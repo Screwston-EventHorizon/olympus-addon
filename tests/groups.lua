@@ -9,7 +9,8 @@ local function WithGroups(fn)
 	WithBoard(function(w, B)
 		local G = ns.Groups
 		local saved = { after = G.after, random = G.random, party = C_PartyInfo, invite = InviteUnit, members = GetNumGroupMembers,
-			inGroup = IsInGroup, leader = UnitIsGroupLeader, count = GetNumQuestLogEntries, title = GetQuestLogTitle }
+			inGroup = IsInGroup, leader = UnitIsGroupLeader, count = GetNumQuestLogEntries, title = GetQuestLogTitle,
+			unitName = UnitName, unitClass = UnitClass, inRaid = IsInRaid }
 		local ok, err = pcall(function()
 			G.Reset()
 			w.invited = {}
@@ -17,8 +18,22 @@ local function WithGroups(fn)
 			G.random = function(a) return a or 0 end
 			C_PartyInfo = { InviteUnit = function(name) w.invited[#w.invited + 1] = name end }
 			InviteUnit = nil
-			GetNumGroupMembers = function() return w.members or 0 end
-			IsInGroup = function() return (w.members or 0) > 0 end
+			-- (The game's party units: w.party = { { name, realm, class file } }, ourselves not among them.)
+			w.party = {}
+			GetNumGroupMembers = function() return w.members or (#w.party > 0 and #w.party + 1 or 0) end
+			IsInGroup = function() return GetNumGroupMembers() > 0 end
+			IsInRaid = function() return false end
+			local playerClass = UnitClass
+			UnitName = function(unit)
+				local m = w.party[tonumber(tostring(unit):match("^party(%d)$") or "")]
+				if m then return m[1], m[2] end
+				return nil
+			end
+			UnitClass = function(unit)
+				local m = w.party[tonumber(tostring(unit):match("^party(%d)$") or "")]
+				if m then return m[3], m[3] end
+				return playerClass(unit)
+			end
 			UnitIsGroupLeader = function() return not w.notLeader end
 			w.quests = {}
 			GetNumQuestLogEntries = function() return #w.quests end
@@ -31,6 +46,7 @@ local function WithGroups(fn)
 		end)
 		G.after, G.random, C_PartyInfo, InviteUnit, GetNumGroupMembers = saved.after, saved.random, saved.party, saved.invite, saved.members
 		IsInGroup, UnitIsGroupLeader, GetNumQuestLogEntries, GetQuestLogTitle = saved.inGroup, saved.leader, saved.count, saved.title
+		UnitName, UnitClass, IsInRaid = saved.unitName, saved.unitClass, saved.inRaid
 		G.Reset()
 		if not ok then error(err, 0) end
 	end)
@@ -50,6 +66,12 @@ local function Line(lines, text)
 	for _, l in ipairs(lines) do if l.text and l.text:find(text, 1, true) then return l end end
 	return nil
 end
+-- A tooltip's lines, as text.
+local function Tip(line)
+	local out = {}
+	line.tooltip({ AddLine = function(_, text) out[#out + 1] = tostring(text) end })
+	return table.concat(out, "\n")
+end
 local function LastWhisper(w) return w.whispered[#w.whispered] end
 local function Sent(w, prefix)
 	for i = #w.sent, 1, -1 do if w.sent[i].msg:sub(1, #prefix) == prefix then return w.sent[i] end end
@@ -60,31 +82,55 @@ test("1.2 groups: a listing's message, its checks, its words made safe; later fi
 	local G = ns.Groups
 	local msg = G.Encode({ id = "a7", guild = "Olympus II", kind = "D", target = "DM", level = 18, class = "PR", need = "103", size = 2,
 		every = 10, age = 3, note = " need |cffff0000heals|r~now " })
-	eq(msg, "GL~a7~Olympus II~D~DM~18~PR~103~2~10~3~~need cffff0000heals r now")
+	eq(msg, "GL~a7~Olympus II~D~DM~18~PR~103~2~~10~3~~need cffff0000heals r now")
 	local e = G.Decode(msg)
 	eq(e.kind, "D"); eq(e.target, "DM"); eq(e.need, "103"); eq(e.size, 2); eq(e.age, 3); eq(e.title, ""); eq(e.note, "need cffff0000heals r now")
 	-- A quest carries its title (cut at 40 bytes); another kind's title is never read.
 	e = G.Decode(G.Encode({ id = "q", guild = "Olympus II", kind = "Q", target = "1234", level = 30, need = "012", size = 1, every = 10, age = 0,
 		title = "The Defias Brotherhood " .. string.rep("x", 40) }))
 	eq(e.target, "1234"); eq(#e.title, 40)
-	eq(G.Decode("GL~a~Olympus II~D~DM~18~PR~113~1~10~0~smuggled~hi").title, "", "a dungeon has no title")
-	eq(G.Decode("GL~a~Olympus II~R~MC~60~PR~+++~12~10~0~~hi~future").note, "hi", "fields after the note: later versions'")
+	eq(G.Decode("GL~a~Olympus II~D~DM~18~PR~113~1~~10~0~smuggled~hi").title, "", "a dungeon has no title")
+	eq(G.Decode("GL~a~Olympus II~R~MC~60~PR~+++~12~~10~0~~hi~future").note, "hi", "fields after the note: later versions'")
 	-- An unknown place of a later version still shows, as Other.
-	e = G.Decode("GL~a~Olympus II~D~NEWDG~18~PR~113~1~10~0~~")
+	e = G.Decode("GL~a~Olympus II~D~NEWDG~18~PR~113~1~~10~0~~")
 	eq(G.Target(e.kind, e.target, e.title), ns.L.GROUPS_OTHER)
 	eq(G.Target("D", "MC"), ns.L.GROUPS_OTHER, "a raid's key is no dungeon")
 	for _, bad in ipairs({
-		"GL~ABC~Olympus II~D~DM~18~PR~113~1~10~0~~", "GL~a~Olympus II~X~DM~18~PR~113~1~10~0~~", "GL~a~Olympus II~D~dm~18~PR~113~1~10~0~~",
-		"GL~a~Olympus II~Q~DM~18~PR~113~1~10~0~~", "GL~a~Olympus II~Q~0~18~PR~113~1~10~0~~", "GL~a~Olympus II~D~DM~18~PR~11~1~10~0~~",
-		"GL~a~Olympus II~D~DM~18~PR~1a3~1~10~0~~", "GL~a~Olympus II~D~DM~0~PR~113~1~10~0~~", "GL~a~Olympus II~D~DM~18~Pr~113~1~10~0~~",
-		"GL~a~Olympus II~D~DM~18~PR~113~0~10~0~~", "GL~a~Olympus II~D~DM~18~PR~113~41~10~0~~", "GL~a~Olympus II~D~DM~18~PR~113~1~9~0~~",
-		"GL~a~Olympus II~D~DM~18~PR~113~1~10~61~~", "GL~a~Olympus II~Q~12~18~PR~113~1~10~31~~", "GL~a~~D~DM~18~PR~113~1~10~0~~",
-		"GL~a~Olympus II~D~DM~18~PR~113~1~10", "G1~a~Olympus II~D~42~PR~10~3~~", 42 }) do
+		"GL~ABC~Olympus II~D~DM~18~PR~113~1~~10~0~~", "GL~a~Olympus II~X~DM~18~PR~113~1~~10~0~~", "GL~a~Olympus II~D~dm~18~PR~113~1~~10~0~~",
+		"GL~a~Olympus II~Q~DM~18~PR~113~1~~10~0~~", "GL~a~Olympus II~Q~0~18~PR~113~1~~10~0~~", "GL~a~Olympus II~D~DM~18~PR~11~1~~10~0~~",
+		"GL~a~Olympus II~D~DM~18~PR~1a3~1~~10~0~~", "GL~a~Olympus II~D~DM~0~PR~113~1~~10~0~~", "GL~a~Olympus II~D~DM~18~Pr~113~1~~10~0~~",
+		"GL~a~Olympus II~D~DM~18~PR~113~0~~10~0~~", "GL~a~Olympus II~D~DM~18~PR~113~41~~10~0~~", "GL~a~Olympus II~D~DM~18~PR~113~1~~9~0~~",
+		"GL~a~Olympus II~D~DM~18~PR~113~1~~10~61~~", "GL~a~Olympus II~Q~12~18~PR~113~1~~10~31~~", "GL~a~~D~DM~18~PR~113~1~~10~0~~",
+		"GL~a~Olympus II~D~DM~18~PR~113~1~~10", "G1~a~Olympus II~D~42~PR~10~3~~", 42 }) do
 		eq(G.Decode(bad), nil, tostring(bad))
 	end
+	-- 1.2: a minimum level (2-99, or empty for any); a quest by a typed name (its target 0, its
+	-- title the name; never without one).
+	e = G.Decode(G.Encode({ id = "m", guild = "Olympus II", kind = "D", target = "SM", level = 30, need = "113", size = 1, every = 10, age = 0, min = 30 }))
+	eq(e.min, 30)
+	eq(G.Decode(G.Encode({ id = "m", guild = "Olympus II", kind = "D", target = "SM", level = 30, need = "113", size = 1, every = 10, age = 0, min = 1 })).min, nil, "1: anyone")
+	for _, bad in ipairs({ "1", "100", "ab", "5x" }) do
+		eq(G.Decode("GL~a~Olympus II~D~DM~18~PR~113~1~" .. bad .. "~10~0~~"), nil, "min " .. bad)
+	end
+	e = G.Decode(G.Encode({ id = "t", guild = "Olympus II", kind = "Q", target = "0", level = 30, need = "012", size = 1, every = 10, age = 0, title = "Mor'Ladim" }))
+	eq(e.target, "0"); eq(G.Target(e.kind, e.target, e.title), "Mor'Ladim")
+	-- Who else is in a group (GM): names, classes, roles when known; a raid's past 250 bytes counted.
+	local m = G.DecodeMembers(G.EncodeMembers("a7", { { name = "Brenna Stoutheart-Realm", class = "PR", role = "H" }, { name = "Cora-Other", class = "MA" } }))
+	eq(m.id, "a7"); eq(m.more, 0); eq(#m.members, 2)
+	eq(m.members[1].name, "Brenna Stoutheart-Realm"); eq(m.members[1].role, "H"); eq(m.members[2].role, nil); eq(m.members[2].class, "MA")
+	local many = {}
+	for i = 1, 39 do many[i] = { name = ("Raider Number%02d-SomeLongRealm"):format(i), class = "WA", role = "D" } end
+	local gm = G.EncodeMembers("zz", many)
+	assert(#gm <= 250, "one message: " .. #gm)
+	m = G.DecodeMembers(gm)
+	eq(#m.members + m.more, 39, "every name listed or counted")
+	assert(m.more > 0)
+	eq(G.EncodeMembers("a7", { { name = "Bad~Name,x:y|z", class = "PR" } }), "GM~a7~0~BadNamexyz:PR:", "no separator travels in a name")
+	eq(G.DecodeMembers("GM~a7~0~Name:Pr:"), nil); eq(G.DecodeMembers("GM~a7~0~Name:PR:X"), nil); eq(G.DecodeMembers("GM~a7~x~"), nil)
+	eq(#G.DecodeMembers("GM~a7~0~").members, 0, "nobody else: the list emptied")
 	-- The longest it gets: one message.
 	local worst = G.Encode({ id = "zz", guild = string.rep("\195\169", 24), kind = "Q", target = "9999999", level = 60, class = "WA", need = "+++",
-		size = 40, every = 30, age = 29, title = string.rep("\195\169", 30), note = string.rep("\195\169", 30) })
+		size = 40, min = 60, every = 30, age = 29, title = string.rep("\195\169", 30), note = string.rep("\195\169", 30) })
 	assert(#worst <= 250, "one message: " .. #worst)
 	assert(G.Decode(worst), "the longest decodes")
 	-- An application: a role, the applicant's level and class, a note.
@@ -426,4 +472,198 @@ test("1.2 groups: English and Portuguese for every string; the help names /oly g
 	end
 	assert(n > 60, "the strings: " .. n)
 	assert(ns.L.HELP_GROUPS:find("/oly group", 1, true))
+end)
+
+test("1.2 groups: a minimum level: the composer starts at the place's own, a click steps it; under it no apply, and the leader takes none", function()
+	WithGroups(function(w, G, B)
+		AsSoldier()
+		G.Show("D", true)
+		G.Compose("D")
+		G.ChooseTarget("SM")
+		eq(G.Composing().min, 30, "Scarlet Monastery's own level")
+		local line = Line(B.Lines(), ns.L.GROUPS_MIN_LINE:format("|cffffd20030|r"))
+		assert(line, Texts(B.Lines()))
+		line.onClick()
+		eq(G.Composing().min, 35)
+		for _ = 1, 7 do G.StepMin() end -- (40, 45, 50, 55, 58, 60, then none)
+		eq(G.Composing().min, nil, "past 60: none")
+		G.StepMin()
+		eq(G.Composing().min, 10)
+		G.Composing().min = 40
+		Line(B.Lines(), ns.L.GROUPS_POST).onClick()
+		local p = w.popups[#w.popups]
+		assert(p.a:find(ns.L.GROUPS_MIN_TIP:format(40), 1, true), p.a)
+		G.ConfirmList(p.data, "")
+		eq(G.Decode(Sent(w, "GL~").msg).min, 40)
+		-- A level 41 applicant is taken; a level 39 one isn't (its addon would have refused it).
+		local id = G.Mine().id
+		G.HandleApply("WHISPER", "Low-Realm", G.EncodeApply(id, "Olympus Zeus", "D", 39, "WA", ""))
+		G.HandleApply("WHISPER", "High-Realm", G.EncodeApply(id, "Olympus Zeus", "D", 41, "WA", ""))
+		eq(#G.Applicants(), 1); eq(G.Applicants()[1].name, "High-Realm")
+		-- Someone else's group from level 50: the card says so, and we (42) can't apply.
+		G.HandlePost("CHANNEL", "Aldric-Realm", G.Encode({ id = "a1", guild = "Olympus Zeus", kind = "D", target = "BRD", level = 55, class = "WA",
+			need = "113", size = 1, min = 50, every = 10, age = 0 }))
+		local card = Line(B.Lines(), "[Blackrock Depths]")
+		assert(card.right:find(ns.L.GROUPS_MIN_SHORT:format(50), 1, true), card.right)
+		assert(Tip(card):find(ns.L.GROUPS_MIN_TIP:format(50), 1, true))
+		card.onClick()
+		local lines = B.Lines()
+		assert(Line(lines, ns.L.GROUPS_TOO_LOW:format(50)), Texts(lines))
+		assert(not Line(lines, ns.L.GROUPS_APPLY_AS:format(ns.L.GROUPS_ROLE_T)), "no apply under the minimum")
+		local before = #w.whispered
+		eq(select(2, G.Apply("Aldric-Realm", "T")), "level")
+		eq(#w.whispered, before, "nothing sent")
+	end)
+end)
+
+test("1.2 groups: a quest by a typed name (an elite, a rare): its dialog, then the roles; it travels as quest 0 with the name", function()
+	WithGroups(function(w, G, B)
+		AsSoldier()
+		G.Show("Q", true)
+		Line(B.Lines(), ns.L.GROUPS_LIST:format(ns.L.GROUPS_KIND_Q)).onClick()
+		local lines = B.Lines()
+		assert(Line(lines, ns.L.GROUPS_NO_QUESTS), "an empty log says so")
+		Line(lines, ns.L.GROUPS_TYPE_NAME).onClick()
+		local p = w.popups[#w.popups]
+		eq(p.name, "OLYMPUS_GROUPS_NAME")
+		eq(G.ConfirmName(p.data, "   "), nil, "no name: still choosing")
+		p.data.answered = nil
+		G.ConfirmName(p.data, "Mor'Ladim |cff00ff00now")
+		eq(G.Composing().target, "0"); eq(G.Composing().title, "Mor'Ladim cff00ff00now"); eq(G.Composing().min, nil, "no minimum for a quest")
+		Line(B.Lines(), ns.L.GROUPS_POST).onClick()
+		G.ConfirmList(w.popups[#w.popups].data, "")
+		local s = Sent(w, "GL~")
+		eq(s.logged, true)
+		local e = G.Decode(s.msg)
+		eq(e.target, "0"); eq(e.title, "Mor'Ladim cff00ff00now")
+		eq(select(2, G.Post("Q", "0", "", "012", "")), "target", "never without a name")
+		-- On another Board it shows by its name, and is never "in your log".
+		G.HandlePost("CHANNEL", "Aldric-Realm", (s.msg:gsub("Olympus II", "Olympus Zeus")))
+		local card = G.Card(G.List("Q")[1])
+		assert(card.text:find("[Mor'Ladim cff00ff00now]", 1, true) and not card.text:find(ns.L.GROUPS_IN_LOG, 1, true), card.text)
+	end)
+end)
+
+test("1.2 groups: who is in a listed group: the leader's GM after the listing, with the roles he invited; on hover; again when it changes", function()
+	WithGroups(function(w, G, B)
+		AsSoldier()
+		assert(G.Post("D", "DM", nil, "113", ""))
+		eq(Sent(w, "GM~"), nil, "alone: no GM")
+		local id = G.Mine().id
+		G.HandleApply("WHISPER", "Brenna Stoutheart-Realm", G.EncodeApply(id, "Olympus Zeus", "H", 20, "PR", ""))
+		G.Invite("Brenna Stoutheart-Realm")
+		-- She and a friend from the chat join; the next tick sends the listing and who is in it.
+		w.party = { { "Brenna Stoutheart", "", "PRIEST" }, { "Cora", "Other", "MAGE" } }
+		w.clock = w.clock + G.UPDATE_GAP
+		G.Tick()
+		local gm = Sent(w, "GM~")
+		assert(gm, "a GM")
+		eq(gm.logged, nil, "names, not words")
+		local m = G.DecodeMembers(gm.msg)
+		eq(m.id, id); eq(#m.members, 2)
+		eq(m.members[1].name, "Brenna Stoutheart-Realm"); eq(m.members[1].role, "H"); eq(m.members[1].class, "PR")
+		eq(m.members[2].name, "Cora-Other"); eq(m.members[2].role, nil); eq(m.members[2].class, "MA")
+		eq(G.Decode(Sent(w, "GL~").msg).size, 3)
+		-- Another Board shows them in the card's tooltip.
+		local gl = Sent(w, "GL~").msg
+		-- (A reader of another Olympus guild: the leader's guild by its claim.)
+		GetGuildInfo = function() return "Olympus Zeus", "Member", 3 end
+		ns.me = "Reader-Realm"
+		G.HandleMembers("CHANNEL", "Soldier-Realm", gm.msg)
+		eq(#G.List("D"), 0, "a GM before its listing is nothing")
+		G.HandlePost("CHANNEL", "Soldier-Realm", gl)
+		G.HandleMembers("GUILD", "Soldier-Realm", gm.msg)
+		G.HandleMembers("CHANNEL", "Other-Realm", gm.msg)
+		eq(G.List("D")[1].members, nil, "only its leader's, only on the channel")
+		G.HandleMembers("CHANNEL", "Soldier-Realm", gm.msg)
+		G.Show("D", true)
+		local tip = Tip(Line(B.Lines(), "[Deadmines]"))
+		assert(tip:find(ns.L.GROUPS_IN_GROUP, 1, true) and tip:find("Brenna Stoutheart", 1, true) and tip:find(ns.L.GROUPS_ROLE_H, 1, true)
+			and tip:find("Cora-Other", 1, true), tip)
+		-- An ignored name is left out.
+		G.HandleMembers("CHANNEL", "Soldier-Realm", G.EncodeMembers(id, { { name = "Troll-Realm", class = "WA" } }))
+		eq(#G.List("D")[1].members, 0)
+		-- Back on the leader's client: Cora leaves; the GM goes again, she isn't in it.
+		AsSoldier()
+		w.party = { { "Brenna Stoutheart", "", "PRIEST" } }
+		w.clock = w.clock + 30
+		G.Tick()
+		w.clock = w.clock + G.UPDATE_GAP
+		G.Tick()
+		m = G.DecodeMembers(Sent(w, "GM~").msg)
+		eq(#m.members, 1)
+		-- The Board's ask is answered with the GM too.
+		B.HandleAsk("CHANNEL", "Asker-Realm", "GQ~")
+		for _, t in ipairs(w.later) do if t.where == "board answer" then t.fn() end end
+		eq(LastWhisper(w).to, "Asker-Realm"); assert(LastWhisper(w).msg:find("^GM~"), LastWhisper(w).msg)
+	end)
+end)
+
+test("1.2 flags for several places: roles and picks after the note (a 1.1 Board reads the plain flag); matching players in each group section", function()
+	WithGroups(function(w, G, B)
+		AsSoldier()
+		-- The composer on the flags page: roles, then places by kind, Any for a whole kind.
+		local lines = B.Lines()
+		Line(lines, ns.L.GROUPS_FLAG_MULTI).onClick()
+		lines = B.Lines()
+		assert(Line(lines, ns.L.GROUPS_FLAG_PICK_ONE), "nothing to raise yet")
+		assert(not Line(lines, ns.L.BOARD_RAISE:format(ns.L.BOARD_FLAG_D)), "the one-click flags wait")
+		G.FlagRole("T"); G.FlagRole("H")
+		Line(B.Lines(), "+ " .. ns.L.GROUPS_TAB_D).onClick()
+		Line(B.Lines(), "Shadowfang Keep").onClick()
+		Line(B.Lines(), "Deadmines").onClick()
+		G.FlagOpen("P")
+		Line(B.Lines(), ns.L.GROUPS_ANY_P).onClick()
+		-- Eight places at most.
+		G.FlagOpen("R")
+		for _, key in ipairs({ "ZG", "AQ20", "MC", "ONY", "BWL", "AQ40", "NAXX" }) do G.FlagPick("R", key) end
+		assert(w.printed[#w.printed]:find(ns.L.GROUPS_FLAG_PICKS_MAX:format(8), 1, true), w.printed[#w.printed])
+		G.FlagPick("R", "*")
+		G.FlagPick("R", "*")
+		Line(B.Lines(), ns.L.GROUPS_FLAG_RAISE).onClick()
+		local p = w.popups[#w.popups]
+		eq(p.name, "OLYMPUS_BOARD_RAISE")
+		eq(p.a, "Deadmines, Shadowfang Keep, " .. ns.L.GROUPS_ANY_P .. "  (" .. ns.L.GROUPS_ROLE_T .. ", " .. ns.L.GROUPS_ROLE_H .. ")")
+		B.Confirm(p.data, "any time tonight")
+		local s = Sent(w, "G1~")
+		local plain = B.Encode({ id = B.Mine().id, guild = "Olympus II", flag = "D", level = 42, class = "PR", every = s.msg:match("^G1~[^~]*~[^~]*~[^~]*~[^~]*~[^~]*~(%d+)"),
+			age = 0, note = "any time tonight" })
+		eq(s.msg, plain .. "~TH~D:DM,SFK;P:*", "the flag as before, then its roles and picks")
+		eq(G.FlagComposing(), false, "raised: the composer closes")
+		assert(Line(B.Lines(), ns.L.BOARD_MINE:format("Deadmines, Shadowfang Keep, " .. ns.L.GROUPS_ANY_P)), Texts(B.Lines()))
+		-- Read back: a flag with roles and picks; malformed ones are the plain flag.
+		local e = B.Decode(s.msg)
+		eq(e.flag, "D"); eq(e.roles, "TH"); eq(e.picks, "D:DM,SFK;P:*"); eq(e.note, "any time tonight")
+		eq(B.Decode(plain .. "~TH~R:MC").picks, "", "its first pick must be its own kind")
+		eq(B.Decode(plain .. "~XX~D:dm").roles, ""); eq(B.Decode(plain .. "~XX~D:dm").picks, "")
+		eq(B.Decode(plain .. "~T~P:*;D:DM").picks, "", "kinds in order")
+		eq(B.ParsePicks("D:A,B,C,D,E,F,G,H,I"), nil, "nine places")
+		-- Someone else's: on the flags page by name and roles; in Dungeons and PvP, not in Raids.
+		B.HandlePost("CHANNEL", "Aldric-Realm", s.msg:gsub("^G1~[^~]*", "G1~a1"):gsub("Olympus II", "Olympus Zeus"))
+		B.HandlePost("CHANNEL", "Brenna-Realm", B.Encode({ id = "b1", guild = "Olympus Zeus", flag = "R", level = 60, class = "PR", every = 10, age = 0 }))
+		local card = Line(B.Lines(), "Aldric")
+		assert(card.text:find("[Deadmines, Shadowfang Keep, " .. ns.L.GROUPS_ANY_P .. "]", 1, true) and card.text:find(ns.L.GROUPS_ROLE_T .. ", " .. ns.L.GROUPS_ROLE_H, 1, true), card.text)
+		eq(#G.Looking("D"), 1); eq(#G.Looking("P"), 1); eq(#G.Looking("R"), 1); eq(G.Looking("R")[1].sender, "Brenna-Realm", "a plain raid flag")
+		eq(#G.Looking("Q"), 0)
+		-- With our Deadmines group needing a tank, Aldric fits, first, and Invite is the game's invite.
+		B.Lower(true)
+		assert(G.Post("D", "DM", nil, "103", "", 16))
+		G.Show("D", true)
+		lines = B.Lines()
+		assert(Line(lines, ns.L.GROUPS_LOOKING:format(1)), Texts(lines))
+		local looking = Line(lines, "Aldric")
+		assert(looking.text:find(ns.L.GROUPS_FITS, 1, true), looking.text)
+		looking.onClick()
+		Line(B.Lines(), "> " .. ns.L.GROUPS_INVITE).onClick()
+		eq(w.invited[#w.invited], "Aldric")
+		-- A Stockade group doesn't fit him (not among his dungeons); a raid section has no invite without a raid listed.
+		eq(G.Fits(G.Looking("D")[1], { kind = "D", target = "STOCK", need = "103" }), false)
+		eq(G.Fits(G.Looking("D")[1], { kind = "D", target = "DM", need = "003" }), false, "no role of his wanted")
+		eq(G.Fits(G.Looking("D")[1], { kind = "D", target = "DM", need = "103", min = 50 }), false, "under the minimum")
+		G.Show("R", true)
+		Line(B.Lines(), "Brenna").onClick()
+		eq(Line(B.Lines(), "> " .. ns.L.GROUPS_INVITE), nil)
+		assert(Line(B.Lines(), ns.L.GROUPS_WHISPER:format("Brenna")))
+		G.Show("flags", true)
+	end)
 end)
