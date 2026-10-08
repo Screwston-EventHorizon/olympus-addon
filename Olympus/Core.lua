@@ -2023,6 +2023,7 @@ local function Help()
 	print(L.HELP_TALK)
 	print(L.HELP_VOX)
 	print(L.HELP_BOARD)
+	print(L.HELP_GROUPS)
 	print(L.HELP_CAMP)
 	print(L.HELP_WEEK)
 	print(L.HELP_CMD_MATES)
@@ -2342,7 +2343,7 @@ local function Slash(input)
 		elseif cmd == "discord" then
 			-- Olympus Link (Link.lua): this character's Discord role; confirmers' keys; watchers.
 			ns.Link.Slash(rest)
-		elseif cmd == "lfg" or cmd == "board" or cmd == "camp" or cmd == "camps" or cmd == "week" then
+		elseif cmd == "lfg" or cmd == "board" or cmd == "camp" or cmd == "camps" or cmd == "week" or cmd == "group" or cmd == "groups" then
 			-- The Board (Board.lua, 1.1): who is looking for a group, and where; camps; the King's week.
 			ns.Board.Slash(cmd, rest)
 		elseif cmd == "netoff" or cmd == "neton" then

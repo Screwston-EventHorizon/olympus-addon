@@ -335,6 +335,7 @@ local function MyLevel()
 	local level = UnitLevel and UnitLevel("player") or 1
 	return math.max(1, math.min(99, tonumber(level) or 1))
 end
+Board.MyClass, Board.MyLevel = MyClass, MyLevel -- (1.2: a group listing's too, Groups.lua)
 
 -- The G1 for one of our posts as it stands now: a flag's zone read again each time (where we
 -- are, and none the moment the player stops sharing); a camp keeps its own (where it was dropped).
@@ -566,11 +567,25 @@ function Board.Ask(now)
 	return true
 end
 
--- Every post of ours, whispered to one asker (its note through the logged API).
+-- When our ask went (nil before it): whispered posts are taken for ANSWER_WINDOW after it (1.2:
+-- a group listing's too, Groups.lua).
+function Board.AskedAt() return askAt end
+
+-- 1.2: our group listing (Groups.lua), when we have one up.
+local function GroupListing()
+	return ns.Groups and not ns.Groups.missing and ns.Groups.Mine and ns.Groups.Mine() or nil
+end
+
+-- Every post of ours, whispered to one asker (its note through the logged API), and our group
+-- listing (1.2) with it.
 local function Answer(asker)
 	local now = ns.Now()
 	for _, p in ipairs(Board.Own()) do
 		ns.Comm.Whisper(asker, Message(p, now), nil, nil, p.note ~= "")
+	end
+	if GroupListing() then
+		local msg, logged = ns.Groups.AnswerMessage(now)
+		if msg then ns.Comm.Whisper(asker, msg, nil, nil, logged) end
 	end
 end
 
@@ -580,7 +595,7 @@ function Board.HandleAsk(dist, sender, text)
 	asks[#asks + 1] = now
 	-- The first asks of a minute only: a crowd logging in at once doesn't flood the holders.
 	if Recent(asks, now, 60) > Board.ASK_BRAKE then return end
-	if #Board.Own() == 0 then return end
+	if #Board.Own() == 0 and not GroupListing() then return end
 	sender = ns.FullName(sender)
 	if answered[sender] and now - answered[sender] < Board.ANSWER_REPEAT then return end
 	if Recent(answersSent, now, 60) >= Board.ANSWERS_PER_MIN then return end
@@ -757,6 +772,12 @@ Board.Hit = Hit
 -- camps (Board.CampLines). `q`: the Realm tab's search, over the cards.
 function Board.Lines(q)
 	local lines = { { text = Gold(L.BOARD_BACK), onClick = function() ns.Views.ShowBoard(false) end, gapAfter = true } }
+	-- 1.2: the Board's sections (Groups.lua): its flags, or one kind of group listing.
+	local G = ns.Groups
+	if G and not G.missing and G.NavLine then
+		lines[#lines + 1] = G.NavLine()
+		if G.Showing() then return G.Lines(lines, q) end
+	end
 	-- The King's week first (Week.lua, 1.1): what the army has on, by day.
 	if ns.Week and ns.Week.Section then ns.Week.Section(lines, q) end
 	if not q then
@@ -961,6 +982,7 @@ end
 -- The line in the Realm tree that opens the page.
 function Board.LinkLine()
 	local parts = { L.BOARD_LINK_FLAGS:format((Board.Count("flag"))), L.BOARD_LINK_CAMPS:format((Board.Count("camp"))) }
+	if ns.Groups and not ns.Groups.missing and ns.Groups.Count then table.insert(parts, 2, L.GROUPS_LINK:format((ns.Groups.Count()))) end
 	local week = ns.Week and ns.Week.LinkPart and ns.Week.LinkPart()
 	if week then table.insert(parts, 1, week) end
 	return {
@@ -998,6 +1020,9 @@ function Board.Slash(cmd, rest)
 		end
 		return Board.PromptCamp(rest)
 	end
+	if cmd == "group" or cmd == "groups" then return ns.Groups.Slash(rest) end
+	-- (/oly lfg and /oly week: the Board on its flags, where the week is too.)
+	if ns.Groups and not ns.Groups.missing and ns.Groups.Show then ns.Groups.Show("flags", true) end
 	if word == "" or cmd == "week" then return Board.Open() end
 	if word == "off" then
 		if not Board.Lower() then ns.Print(L.BOARD_NONE_UP) end
