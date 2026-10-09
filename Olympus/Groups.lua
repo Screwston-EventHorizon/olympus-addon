@@ -8,7 +8,7 @@ local L = ns.L
 -- Board's page shows one section at a time (its strip: Flags, Dungeons, Raids, PvP, Quests).
 -- The invite is the game's own (C_PartyInfo.InviteUnit), from the leader's click on an
 -- applicant's Invite; nothing invites anyone by itself, and nothing joins a queue.
---   GL~<id>~<guild>~<kind>~<target>~<level>~<class>~<need>~<size>~<min>~<every>~<age>~<title>~<note>
+--   GL~<id>~<guild>~<kind>~<target>~<level>~<class>~<need>~<size>~<min>~<zone>~<every>~<age>~<title>~<note>
 --       id      1-2 base-36 characters, new for each listing and kept by its refreshes
 --       kind    D dungeon, R raid, P PvP, Q quest
 --       target  D, R and P: a place's key (Groups.PLACES; one this version doesn't know shows
@@ -19,7 +19,11 @@ local L = ns.L
 --               wanted) or "+" (any number)
 --       size    how many are in the leader's group now, 1-40
 --       min     the lowest level that may apply, 2-99, or empty for any
---       every   minutes to its next refresh (10-30); age: minutes since it was listed
+--       zone    a quest's zone as the leader's log (or his map, for a typed name) says it,
+--               ZONE_MAX bytes at most; empty for the other kinds
+--       every   minutes to its next refresh (EVERY_MIN-EVERY_MAX: 5 while few groups are up, so
+--               a leader who left is gone from every Board within about 12 minutes); age:
+--               minutes since it was listed
 --       title   a quest's title as the leader's log has it (empty for the other kinds)
 --       note    the leader's own words, Board.NOTE_MAX bytes at most, the last field
 --   The listing goes with the logged API whenever it carries words (a note or a quest's title).
@@ -67,6 +71,9 @@ Groups.STEPS = { D = "01234", Q = "01234", R = "012345+", P = "012345+" }
 Groups.DEFAULT_NEED = { D = "113", Q = "012", R = "+++", P = "0++" }
 Groups.MIN_STEPS = { 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 58, 60 } -- a minimum level's click steps (and the place's own)
 Groups.MEMBERS_MAX = 39      -- names a GM may list
+Groups.EVERY_MIN, Groups.EVERY_MAX = 5, 30 -- minutes between a listing's refreshes, by how many are up
+Groups.ZONE_MAX = 30         -- bytes of a quest's zone
+Groups.INVITE_WAIT = 120     -- seconds an invite waits for its player to join before its role is wanted again
 
 -- The places a listing names (WoW: Forever's, as its players know them; a key is never shown).
 -- min: the level the place is usually run from (the composer sorts by it). A key this version
@@ -135,6 +142,10 @@ local lowered = {}     -- ["Name-Realm#id"] = when it was lowered
 local own              -- our listing: { id, kind, target, title, need, note, raisedAt, sentAt, every, dirty }
 local applicants = {}  -- to our listing: [Name-Realm] = { name, guild, role, level, class, note, at, state }
 local apps = {}        -- ours: [leader] = { id, role, at, state, kind, target, title }
+local pending = {}     -- our invites waiting for their player to join: [Name-Realm] = { role, at }
+local roles = {}       -- our group's members' roles, as they joined or as we set them: [Name-Realm] = role
+local filters = {}     -- the page's filters by section: [kind] = "all"... and filters.looking
+local rosterPending = false -- (a roster check waiting: GROUP_ROSTER_UPDATE comes in bursts)
 local usedIds = {}
 local lastList, lists = -math.huge, {}
 local view = "flags"   -- the Board's section shown: "flags" (Board.lua's page) or a kind
@@ -195,30 +206,32 @@ local function CleanMin(min)
 end
 Groups.CleanMin = CleanMin
 
+function Groups.CleanZone(s) return Clean(s, Groups.ZONE_MAX) end
+
 function Groups.Encode(e)
-	return ("GL~%s~%s~%s~%s~%d~%s~%s~%d~%s~%d~%d~%s~%s"):format(e.id, CleanGuild(e.guild), e.kind, tostring(e.target),
+	return ("GL~%s~%s~%s~%s~%d~%s~%s~%d~%s~%s~%d~%d~%s~%s"):format(e.id, CleanGuild(e.guild), e.kind, tostring(e.target),
 		math.floor(tonumber(e.level) or 1), tostring(e.class or ""), e.need, math.max(1, math.min(40, math.floor(tonumber(e.size) or 1))),
-		tostring(CleanMin(e.min) or ""), e.every, math.max(0, math.floor(tonumber(e.age) or 0)), e.kind == "Q" and Groups.CleanTitle(e.title) or "", ns.Board.CleanNote(e.note))
+		tostring(CleanMin(e.min) or ""), e.kind == "Q" and Groups.CleanZone(e.zone) or "", e.every, math.max(0, math.floor(tonumber(e.age) or 0)), e.kind == "Q" and Groups.CleanTitle(e.title) or "", ns.Board.CleanNote(e.note))
 end
 
 -- The GL as a table, or nil for anything malformed. Fields past the note are left for later versions.
 function Groups.Decode(s)
 	if type(s) ~= "string" then return nil end
-	local id, guild, kind, target, level, class, need, size, min, every, age, title, rest =
-		s:match("^GL~([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)~?(.*)$")
+	local id, guild, kind, target, level, class, need, size, min, zone, every, age, title, rest =
+		s:match("^GL~([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)~?(.*)$")
 	if not id or not id:find("^[0-9a-z][0-9a-z]?$") or not Groups.KIND[kind] then return nil end
 	if guild == "" or LongGuild(guild) or not ValidTarget(kind, target) or not ValidNeed(need) then return nil end
 	level, size = tonumber(level:match("^%d%d?$") or ""), tonumber(size:match("^%d%d?$") or "")
 	every, age = tonumber(every:match("^%d%d?$") or ""), tonumber(age:match("^%d%d?%d?$") or "")
 	if not level or level < 1 or not size or size < 1 or size > 40 then return nil end
-	if not every or every < ns.Board.EVERY_MIN or every > ns.Board.EVERY_MAX then return nil end
+	if not every or every < Groups.EVERY_MIN or every > Groups.EVERY_MAX then return nil end
 	if not age or age * 60 > Life(kind) then return nil end
 	if class ~= "" and not class:find("^%u%u$") then return nil end
 	if min ~= "" and not (min:find("^%d%d?$") and CleanMin(min)) then return nil end
 	title = kind == "Q" and Groups.CleanTitle(title) or ""
 	if kind == "Q" and target == "0" and title == "" then return nil end -- (a typed name is its title)
 	return { id = id, guild = guild, kind = kind, target = target, level = level, class = class, need = need, size = size,
-		min = CleanMin(min), every = every, age = age, title = title, note = ns.Board.CleanNote(rest:match("^[^~]*")) }
+		min = CleanMin(min), zone = kind == "Q" and Groups.CleanZone(zone) or "", every = every, age = age, title = title, note = ns.Board.CleanNote(rest:match("^[^~]*")) }
 end
 
 -- Who else is in a group: { { name, class, role } }, as one GM of 250 bytes at most (the names
@@ -315,7 +328,7 @@ end
 
 local function Expires(e)
 	local life = Life(e.kind)
-	return math.min(e.raisedAt + life, e.firstSeen + life + Groups.SLACK, e.heardAt + (2 * e.every + 1) * 60)
+	return math.min(e.raisedAt + life, e.firstSeen + life + Groups.SLACK, e.heardAt + (2 * e.every + 2) * 60)
 end
 
 local function Off(sender, guild)
@@ -377,6 +390,7 @@ function Groups.QuestLog()
 		if ok then count = tonumber(n) or 0 end
 	end
 	count = math.min(count, 200)
+	local zone = ""
 	for i = 1, count do
 		local title, level, group, header, id
 		if GetQuestLogTitle then
@@ -388,8 +402,10 @@ function Groups.QuestLog()
 				title, level, group, header, id = info.title, info.level, info.suggestedGroup, info.isHeader, info.questID
 			end
 		end
-		if type(title) == "string" and title ~= "" and not (header == true or header == 1) and tonumber(id) and tonumber(id) > 0 then
-			out[#out + 1] = { id = math.floor(tonumber(id)), title = Groups.CleanTitle(title), level = tonumber(level) or 0,
+		if type(title) == "string" and title ~= "" and (header == true or header == 1) then
+			zone = Groups.CleanZone(title) -- (a header: the zone of the quests under it)
+		elseif type(title) == "string" and title ~= "" and tonumber(id) and tonumber(id) > 0 then
+			out[#out + 1] = { id = math.floor(tonumber(id)), title = Groups.CleanTitle(title), level = tonumber(level) or 0, zone = zone,
 				group = (tonumber(group) or 0) > 1 or (type(group) == "string" and group ~= "") }
 		end
 	end
@@ -400,6 +416,12 @@ function Groups.QuestLog()
 	end)
 	return out
 end
+-- The zone we are in, as a quest's zone travels.
+function Groups.CurrentZone()
+	local z = GetRealZoneText and GetRealZoneText() or (GetZoneText and GetZoneText()) or ""
+	return Groups.CleanZone(type(z) == "string" and z or "")
+end
+
 local function InLog(target)
 	for _, q in ipairs(Groups.QuestLog()) do if tostring(q.id) == tostring(target) then return true end end
 	return false
@@ -465,7 +487,7 @@ function Groups.HandlePost(dist, sender, text)
 	local old = posts[sender]
 	local raisedAt = now - e.age * 60
 	if old and old.id == e.id then
-		for _, k in ipairs({ "guild", "kind", "target", "level", "class", "need", "size", "min", "every", "title", "note" }) do old[k] = e[k] end
+		for _, k in ipairs({ "guild", "kind", "target", "level", "class", "need", "size", "min", "zone", "every", "title", "note" }) do old[k] = e[k] end
 		old.raisedAt, old.heardAt = math.min(old.raisedAt, raisedAt), now
 		return Changed()
 	end
@@ -557,8 +579,10 @@ function Groups.GroupMembers()
 			local full = ns.FullName(ns.Normal(name), type(realm) == "string" and realm ~= "" and realm or nil)
 			if full ~= ns.me then
 				local a = applicants[full]
+				local level = UnitLevel and tonumber(UnitLevel(unit)) or nil
 				out[#out + 1] = { name = full, class = ns.Roster.ClassCode(UnitClass and select(2, UnitClass(unit))):match("^%u%u$") or "",
-					role = a and a.state == "invited" and a.role or nil }
+					level = level and level > 0 and level or nil,
+					role = roles[full] or (a and a.state == "invited" and a.role) or nil }
 			end
 		end
 	end
@@ -576,7 +600,7 @@ local function MyLevel() return ns.Board.MyLevel and ns.Board.MyLevel() or 1 end
 
 local function Message(p, now)
 	return Groups.Encode({ id = p.id, guild = GetGuildInfo("player"), kind = p.kind, target = p.target, level = MyLevel(), class = MyClass(),
-		need = p.need, size = GroupSize(), min = p.min, every = p.every, age = math.floor((now - p.raisedAt) / 60), title = p.title, note = p.note })
+		need = p.need, size = GroupSize(), min = p.min, zone = p.zone, every = p.every, age = math.floor((now - p.raisedAt) / 60), title = p.title, note = p.note })
 end
 Groups.Message = Message
 
@@ -592,7 +616,7 @@ local function Save()
 		for name, a in pairs(applicants) do
 			list[name] = { guild = a.guild, role = a.role, level = a.level, class = a.class, note = a.note, at = a.at, state = a.state }
 		end
-		mine = { id = own.id, kind = own.kind, target = own.target, title = own.title, need = own.need, note = own.note, min = own.min,
+		mine = { id = own.id, kind = own.kind, target = own.target, title = own.title, need = own.need, note = own.note, min = own.min, zone = own.zone,
 			raisedAt = own.raisedAt, sentAt = own.sentAt, every = own.every, applicants = list }
 	end
 	all[ns.me or "?"] = mine
@@ -606,9 +630,9 @@ function Groups.Restore(now)
 	if type(p) ~= "table" or own then return end
 	local fine = type(p.id) == "string" and p.id:find("^[0-9a-z][0-9a-z]?$") and Groups.KIND[p.kind] and type(p.target) == "string"
 		and ValidTarget(p.kind, p.target) and not (p.target == "0" and Groups.CleanTitle(p.title) == "") and ValidNeed(p.need) and tonumber(p.raisedAt) and tonumber(p.sentAt) and tonumber(p.every)
-	if fine and now - p.raisedAt < Life(p.kind) and now < p.sentAt + (2 * p.every + 1) * 60 then
+	if fine and now - p.raisedAt < Life(p.kind) and now < p.sentAt + (2 * p.every + 2) * 60 then
 		own = { id = p.id, kind = p.kind, target = p.target, title = Groups.CleanTitle(p.title), need = p.need, note = ns.Board.CleanNote(p.note),
-			min = CleanMin(p.min),
+			min = CleanMin(p.min), zone = p.kind == "Q" and Groups.CleanZone(p.zone) or "",
 			raisedAt = p.raisedAt, sentAt = p.sentAt, every = p.every }
 		usedIds[p.id] = now
 		for name, a in pairs(type(p.applicants) == "table" and p.applicants or {}) do
@@ -634,8 +658,17 @@ local function SendMembers(p)
 	ns.Comm.Send("CHANNEL", Groups.EncodeMembers(p.id, list), "groupm" .. p.id)
 end
 
+-- Minutes between a listing's refreshes: EVERY_MIN while few are up, up to EVERY_MAX when the
+-- Board is full (12 seconds a listing), so the channel carries about the same whatever the crowd.
+function Groups.Interval(n)
+	n = n or Groups.Count()
+	return math.max(Groups.EVERY_MIN, math.min(Groups.EVERY_MAX, math.ceil(n * 12 / 60)))
+end
+
 local function Send(p, now)
-	p.every = ns.Board.Interval(Groups.Count(nil, now) + ns.Board.Count("flag", now))
+	-- (Inside an instance the game holds addon messages: it goes once we are out, Tick.)
+	if ns.ChatLocked() then p.dirty = true return end
+	p.every = Groups.Interval(Groups.Count(nil, now))
 	p.sentAt, p.dirty = now, nil
 	ns.Comm.Send("CHANNEL", Message(p, now), QueueKey(p), nil, Words(p))
 	SendMembers(p)
@@ -643,7 +676,7 @@ local function Send(p, now)
 end
 
 -- A new listing: ours replaces the one we had (its GX first, as a flag's G0).
-function Groups.Post(kind, target, title, need, note, min)
+function Groups.Post(kind, target, title, need, note, min, zone)
 	if not Groups.KIND[kind] or not ValidNeed(need) then return false, "listing" end
 	target = tostring(target or "")
 	if not ValidTarget(kind, target) then return false, "target" end
@@ -668,7 +701,7 @@ function Groups.Post(kind, target, title, need, note, min)
 	lists[#lists + 1] = now
 	if own then Groups.Close(true) end
 	own = { id = NewId(now), kind = kind, target = target, title = kind == "Q" and Groups.CleanTitle(title) or "", need = need,
-		note = ns.Board.CleanNote(note), min = CleanMin(min), raisedAt = now }
+		note = ns.Board.CleanNote(note), min = CleanMin(min), zone = kind == "Q" and Groups.CleanZone(zone) or "", raisedAt = now }
 	wipe(applicants)
 	compose = nil
 	Send(own, now)
@@ -691,6 +724,7 @@ function Groups.Close(quiet)
 	end
 	own = nil
 	wipe(applicants)
+	wipe(pending)
 	opened = nil
 	Save()
 	if not quiet then ns.Print(L.GROUPS_CLOSED) end
@@ -741,6 +775,8 @@ function Groups.HandleApply(dist, sender, text)
 	end
 	applicants[sender] = { name = sender, guild = a.guild, role = a.role, level = a.level, class = a.class, note = a.note, at = now,
 		state = old and old.state == "invited" and "invited" or "new" }
+	-- (A sound of its own, the "groups" switch of /oly sound; once for each new applicant.)
+	if not old then ns.PlayAlert("soft", "groups") end
 	Save()
 	ns.Print(L.GROUPS_APPLICANT:format(ns.DisplayName(sender) or sender, Groups.RoleLabel(a.role), Groups.Target(own.kind, own.target, own.title)))
 	Changed()
@@ -758,32 +794,110 @@ function Groups.HandleWithdraw(dist, sender, text)
 	end
 end
 
--- The leader's click on Invite: the game's invite, the applicant told, the role taken off the need.
-function Groups.Invite(name) -- gp:roster-actions
-	local a = applicants[name]
-	if not own or not a then return false end
+-- Whether we may invite now: not while another player leads our group.
+local function MayInvite()
 	if IsInGroup and IsInGroup() and UnitIsGroupLeader and not UnitIsGroupLeader("player") then
 		ns.Print(L.GROUPS_NOT_LEADER)
-		return false, "leader"
+		return false
 	end
+	return true
+end
+
+-- The game's invite, from the leader's click (the gp:roster-actions entry: never otherwise).
+local function GameInvite(name) -- gp:roster-actions
 	local target = ns.TellName(name) or name
 	if C_PartyInfo and C_PartyInfo.InviteUnit then C_PartyInfo.InviteUnit(target) elseif InviteUnit then InviteUnit(target) end -- gp:roster-actions
+end
+
+-- The leader's click on Invite (as the role they applied for): the game's invite and the applicant
+-- told. The role comes off what the listing needs when they join (Groups.CheckJoins), not before:
+-- an invite declined or let lapse leaves the role wanted.
+function Groups.Invite(name)
+	local a = applicants[name]
+	if not own or not a then return false end
+	if not MayInvite() then return false, "leader" end
+	GameInvite(name)
 	a.state = "invited"
+	pending[name] = { role = a.role, at = ns.Now() }
 	ns.Comm.Whisper(name, ("GR~%s~I"):format(own.id))
-	local i = Groups.ROLE[a.role]
-	local c = own.need:sub(i, i)
-	if c:find("^[1-9]$") then own.need = own.need:sub(1, i - 1) .. tostring(tonumber(c) - 1) .. own.need:sub(i + 1) end
 	ns.Print(L.GROUPS_INVITED:format(ns.DisplayName(name) or name, Groups.RoleLabel(a.role)))
 	opened = nil
+	Save()
+	Changed()
+	return true
+end
+
+function Groups.Pending() return pending end
+
+-- One of a role found: the need's count goes down by one ("+", any number, stays).
+local function TakeRole(role)
+	local i = Groups.ROLE[role]
+	if not own or not i then return end
+	local c = own.need:sub(i, i)
+	if c:find("^[1-9]$") then own.need = own.need:sub(1, i - 1) .. tostring(tonumber(c) - 1) .. own.need:sub(i + 1) end
+end
+
+-- Who of our invites joined (their role taken off the need, their application done), and whose
+-- invite lapsed (INVITE_WAIT: their role wanted again, their application waiting again).
+function Groups.CheckJoins(now)
+	now = now or ns.Now()
+	local here = {}
+	for _, m in ipairs(Groups.GroupMembers()) do here[m.name] = true end
+	if not next(here) then wipe(roles) end -- (no group: no roles to keep)
+	if not own then wipe(pending) return end
+	local changed = false
+	for name, p in pairs(pending) do
+		if here[name] then
+			pending[name] = nil
+			roles[name] = p.role
+			applicants[name] = nil
+			TakeRole(p.role)
+			changed = true
+			ns.Print(L.GROUPS_JOINED:format(ns.DisplayName(name) or name, Groups.RoleLabel(p.role)))
+		elseif now - p.at >= Groups.INVITE_WAIT then
+			pending[name] = nil
+			if applicants[name] then applicants[name].state = "new" end
+			changed = true
+			ns.Print(L.GROUPS_NOT_JOINED:format(ns.DisplayName(name) or name, Groups.RoleLabel(p.role)))
+		end
+	end
+	if not changed then return end
 	if own.need == "000" then
 		ns.Print(L.GROUPS_FILLED)
 		Groups.Close(true)
-	else
-		Update(ns.Now())
-		Save()
-		Changed()
+		return
 	end
-	return true
+	Update(now)
+	Save()
+	Changed()
+end
+
+-- The leader changes what the listing needs (a member switched roles, a friend came from the chat):
+-- a click steps one role, as in the composer; it goes out with the listing's next send.
+local function Cycle(kind, c)
+	local steps = Groups.STEPS[kind]
+	local at = steps:find(c, 1, true) or 0
+	local i = at % #steps + 1
+	return steps:sub(i, i)
+end
+function Groups.StepOwnNeed(role)
+	local i = Groups.ROLE[role]
+	if not own or not i then return end
+	own.need = own.need:sub(1, i - 1) .. Cycle(own.kind, own.need:sub(i, i)) .. own.need:sub(i + 1)
+	Update(ns.Now())
+	Save()
+	Redraw()
+end
+-- A member's role as the leader sets it (Tank, Healer, Damage, none, in turn): shown on the
+-- group's card on every Board (the GM). The game says no role here.
+function Groups.SetMemberRole(name, role)
+	if role == nil then
+		local cur = roles[name]
+		role = cur == nil and "T" or cur == "T" and "H" or cur == "H" and "D" or nil
+	end
+	roles[name] = Groups.ROLE[role] and role or nil
+	if own then Update(ns.Now()) end
+	Redraw()
 end
 
 function Groups.Decline(name)
@@ -791,6 +905,7 @@ function Groups.Decline(name)
 	if not own or not a then return false end
 	ns.Comm.Whisper(name, ("GR~%s~D"):format(own.id))
 	applicants[name] = nil
+	pending[name] = nil
 	opened = nil
 	Save()
 	Changed()
@@ -867,6 +982,7 @@ end
 
 function Groups.Tick(now)
 	now = now or ns.Now()
+	Groups.CheckJoins(now)
 	if own then
 		if not ns.IsMember() then
 			own = nil
@@ -943,32 +1059,29 @@ local function Hit(q, e)
 end
 Groups.Hit = Hit
 
--- A listing's card: where, who and their guild, what it needs, the note; on the right its size and
--- age. A click opens its actions under it (apply with a role, whisper the leader).
-function Groups.Card(e)
-	local who = ns.DisplayName(e.sender) or "?"
-	local where = Groups.Target(e.kind, e.target, e.title)
-	local mine = e.kind == "Q" and InLog(e.target) and ("  " .. Green(L.GROUPS_IN_LOG)) or ""
-	return {
-		indent = 1,
-		text = Gold("[" .. where .. "]") .. " " .. Colored(who, e.class) .. " " .. Green("<" .. ns.Codec.Plain(e.guild) .. ">")
-			.. "  " .. L.GROUPS_NEEDS:format(Groups.NeedText(e.need)) .. Note(e.note) .. mine,
-		right = (e.min and (Grey(L.GROUPS_MIN_SHORT:format(e.min)) .. "  ") or "") .. SizeText(e.kind, e.size) .. "  " .. Grey(ns.Ago(e.raisedAt)),
-		onClick = function() opened = opened ~= e.sender and e.sender or nil; Redraw() end,
-		tooltip = function(tt)
-			tt:AddLine(Groups.KindLabel(e.kind) .. ": " .. where, 1, 0.82, 0)
-			local class = ClassName(e.class)
-			tt:AddLine(("%s <%s>  %s"):format(who, ns.Codec.Plain(e.guild), L.LEVEL_N:format(e.level)) .. (class and ("  " .. class) or ""), 1, 1, 1)
-			tt:AddLine(L.GROUPS_NEEDS:format(Groups.NeedText(e.need)), 1, 1, 1, true)
-			if e.min then tt:AddLine(L.GROUPS_MIN_TIP:format(e.min), 1, 1, 1, true) end
-			if e.note ~= "" and not ns.KingsScreen() then tt:AddLine('"' .. e.note .. '"', 1, 1, 1, true) end
-			Groups.MembersTip(tt, e)
-			tt:AddLine(L.GROUPS_CARD_TIP, 0.6, 0.6, 0.6, true)
-		end,
-	}
+-- What a listing needs, short enough for its row: "1T 1H 3D" ("T+": any number), or "full".
+function Groups.NeedShort(need)
+	local parts = {}
+	for _, role in ipairs(Groups.ROLES) do
+		local c = NeedOf(need, role)
+		if c then parts[#parts + 1] = c == "+" and (L["GROUPS_SHORT_" .. role] .. "+") or (c .. L["GROUPS_SHORT_" .. role]) end
+	end
+	return #parts > 0 and table.concat(parts, " ") or L.GROUPS_FULL
 end
 
--- Who is in a listed group, in its card's tooltip: the leader, then the names his GM gave.
+-- Our own listing as the list shows it (first, marked as ours), with our group as it is now.
+function Groups.OwnEntry()
+	if not own then return nil end
+	return { sender = ns.me, id = own.id, guild = GetGuildInfo("player") or "", kind = own.kind, target = own.target, title = own.title,
+		level = MyLevel(), class = MyClass(), need = own.need, size = GroupSize(), min = own.min, zone = own.zone or "", note = own.note,
+		raisedAt = own.raisedAt, members = Groups.GroupMembers(), mine = true }
+end
+
+-- Whether we could join a group: of its minimum level, and it still needs someone.
+local function CanJoin(e) return not (e.min and MyLevel() < e.min) and e.need ~= "000" end
+
+-- Who is in a group: the names its leader's GM gave (ours: our group as it is), each with its
+-- class, its level when we know it and its role when an application or the leader said it.
 function Groups.MembersTip(tt, e)
 	local list = e.members or {}
 	if #list == 0 and (e.more or 0) == 0 then return end
@@ -977,13 +1090,47 @@ function Groups.MembersTip(tt, e)
 		local class = ClassName(m.class)
 		local bits = {}
 		if m.role then bits[#bits + 1] = Groups.RoleLabel(m.role) end
+		if m.level then bits[#bits + 1] = L.LEVEL_N:format(m.level) end
 		if class then bits[#bits + 1] = class end
 		tt:AddLine(Colored(ns.DisplayName(m.name) or m.name, m.class) .. (#bits > 0 and ("  " .. Grey(table.concat(bits, ", "))) or ""), 1, 1, 1)
 	end
 	if (e.more or 0) > 0 then tt:AddLine(Grey(L.GROUPS_MORE:format(e.more)), 1, 1, 1) end
 end
 
--- The actions under an opened card.
+-- A listing in full, on hover: where, its leader, what it needs, its minimum, zone and note, who is in it.
+function Groups.ListingTip(tt, e)
+	local who = ns.DisplayName(e.sender) or "?"
+	tt:AddLine(Groups.KindLabel(e.kind) .. ": " .. Groups.Target(e.kind, e.target, e.title), 1, 0.82, 0)
+	local class = ClassName(e.class)
+	tt:AddLine(("%s <%s>  %s"):format(who, ns.Codec.Plain(e.guild), L.LEVEL_N:format(e.level)) .. (class and ("  " .. class) or ""), 1, 1, 1)
+	tt:AddLine(L.GROUPS_NEEDS:format(Groups.NeedText(e.need)) .. "  (" .. SizeText(e.kind, e.size) .. ")", 1, 1, 1, true)
+	if e.min then tt:AddLine(L.GROUPS_MIN_TIP:format(e.min), 1, 1, 1, true) end
+	if e.kind == "Q" and (e.zone or "") ~= "" then tt:AddLine(L.GROUPS_ZONE:format(e.zone), 1, 1, 1, true) end
+	if e.kind == "Q" and InLog(e.target) then tt:AddLine(L.GROUPS_IN_LOG, 0.25, 1, 0.25) end
+	if e.note ~= "" and not ns.KingsScreen() then tt:AddLine('"' .. e.note .. '"', 1, 1, 1, true) end
+	Groups.MembersTip(tt, e)
+	tt:AddLine(e.mine and L.GROUPS_OWN_TIP or L.GROUPS_CARD_TIP, 0.6, 0.6, 0.6, true)
+end
+
+-- A listing's row: where and its leader; on the right what it needs, its minimum, size and age.
+-- A click opens its card under it; the mouse over it shows it in full.
+function Groups.Card(e)
+	local who = ns.DisplayName(e.sender) or "?"
+	local where = Groups.Target(e.kind, e.target, e.title)
+	local key = e.mine and "own" or e.sender
+	local have = e.kind == "Q" and InLog(e.target) and ("  " .. Green(L.GROUPS_IN_LOG)) or ""
+	return {
+		indent = 1,
+		text = Gold("[" .. where .. "]") .. " " .. Colored(who, e.class) .. (e.mine and ("  " .. Green(L.GROUPS_YOUR_GROUP)) or "") .. have,
+		right = Gold(Groups.NeedShort(e.need)) .. "  " .. (e.min and (Grey(L.GROUPS_MIN_SHORT:format(e.min)) .. "  ") or "")
+			.. SizeText(e.kind, e.size) .. "  " .. Grey(ns.Ago(e.raisedAt)),
+		onClick = function() opened = opened ~= key and key or nil; Redraw() end,
+		tooltip = function(tt) Groups.ListingTip(tt, e) end,
+	}
+end
+
+-- What we can do with someone else's listing: apply with a role it needs (of its minimum level),
+-- or see our application and withdraw it; whisper its leader.
 local function CardActions(lines, e)
 	local a = apps[e.sender]
 	if a then
@@ -1007,32 +1154,136 @@ local function CardActions(lines, e)
 		onClick = function() ns.Board.Whisper(e.sender) end }
 end
 
--- An applicant to our listing, and the actions under it when opened.
-local function ApplicantLines(lines, a)
+-- A member's row (the group card, our roster): name in their class's colour; role, level, class.
+local function MemberRow(m, indent)
+	local class = ClassName(m.class)
+	local bits = {}
+	if m.level then bits[#bits + 1] = L.LEVEL_N:format(m.level) end
+	if class then bits[#bits + 1] = class end
+	return { indent = indent, text = Colored(ns.DisplayName(m.name) or m.name, m.class) .. (#bits > 0 and ("  " .. Grey(table.concat(bits, ", "))) or ""),
+		right = m.role and Green(Groups.RoleLabel(m.role)) or Grey(L.GROUPS_ROLE_UNSET) }
+end
+
+-- The group card, under its opened row: its leader, needs, minimum, zone, note and members, then
+-- what we can do (ours: managed under Your group).
+local function CardLines(lines, e)
+	local who = ns.DisplayName(e.sender) or "?"
+	local class = ClassName(e.class)
+	local function Add(text, right) lines[#lines + 1] = { indent = 2, text = text, right = right } end
+	Add(L.GROUPS_CARD_LEADER:format(Colored(who, e.class), ns.Codec.Plain(e.guild)), Grey(L.LEVEL_N:format(e.level) .. (class and ("  " .. class) or "")))
+	Add(L.GROUPS_NEEDS:format(Groups.NeedText(e.need)), SizeText(e.kind, e.size))
+	if e.min then Add(L.GROUPS_MIN_TIP:format(e.min)) end
+	if e.kind == "Q" and (e.zone or "") ~= "" then Add(L.GROUPS_ZONE:format(e.zone)) end
+	if e.note ~= "" and not ns.KingsScreen() then Add('"' .. e.note .. '"') end
+	local list = e.members or {}
+	if #list > 0 or (e.more or 0) > 0 then
+		Add(Gold(L.GROUPS_IN_GROUP))
+		for _, m in ipairs(list) do lines[#lines + 1] = MemberRow(m, 3) end
+		if (e.more or 0) > 0 then lines[#lines + 1] = { indent = 3, text = Grey(L.GROUPS_MORE:format(e.more)) } end
+	end
+	if e.mine then Add(Grey(L.GROUPS_MANAGE_ABOVE)) return end
+	CardActions(lines, e)
+end
+
+-- An application in full, on hover: who, their guild, level and class, the role, the note, when.
+function Groups.ApplicantTip(tt, a)
 	local who = ns.DisplayName(a.name) or a.name
 	local class = ClassName(a.class)
+	tt:AddLine(L.GROUPS_APPLIED_AS:format(Colored(who, a.class), Groups.RoleLabel(a.role)), 1, 0.82, 0)
+	tt:AddLine(("<%s>  %s"):format(ns.Codec.Plain(a.guild), L.LEVEL_N:format(a.level)) .. (class and ("  " .. class) or ""), 1, 1, 1)
+	if a.note ~= "" and not ns.KingsScreen() then tt:AddLine('"' .. a.note .. '"', 1, 1, 1, true) end
+	tt:AddLine(ns.Ago(a.at), 0.6, 0.6, 0.6)
+	if Groups.GearTip then Groups.GearTip(tt, a) end
+	tt:AddLine(L.GROUPS_APPLICANT_TIP, 0.6, 0.6, 0.6, true)
+end
+
+-- An applicant to our listing: their role, name, level; a click opens their card (Invite as the
+-- role they applied for, Decline, Whisper).
+local function ApplicantLines(lines, a)
+	local who = ns.DisplayName(a.name) or a.name
+	local waiting = pending[a.name]
 	lines[#lines + 1] = { indent = 1,
-		text = Green(Groups.RoleLabel(a.role)) .. "  " .. Colored(who, a.class) .. " " .. Green("<" .. ns.Codec.Plain(a.guild) .. ">")
-			.. "  " .. L.LEVEL_N:format(a.level) .. (class and (" " .. class) or "") .. Note(a.note),
-		right = (a.state == "invited" and (Green(L.GROUPS_STATE_INVITED) .. "  ") or "") .. Grey(ns.Ago(a.at)),
+		text = Green(Groups.RoleLabel(a.role)) .. "  " .. Colored(who, a.class) .. "  " .. Grey(L.LEVEL_N:format(a.level)),
+		right = (waiting and (Green(L.GROUPS_STATE_INVITED) .. "  ") or "") .. Grey(ns.Ago(a.at)),
 		onClick = function() opened = opened ~= a.name and a.name or nil; Redraw() end,
-		tooltip = function(tt) tt:AddLine(who, 1, 0.82, 0); tt:AddLine(L.GROUPS_APPLICANT_TIP, 1, 1, 1, true) end }
+		tooltip = function(tt) Groups.ApplicantTip(tt, a) end }
 	if opened == a.name then
-		if a.state ~= "invited" then
-			lines[#lines + 1] = { indent = 2, text = Gold("> " .. L.GROUPS_INVITE), onClick = function() Groups.Invite(a.name) end }
+		if a.note ~= "" and not ns.KingsScreen() then lines[#lines + 1] = { indent = 2, text = '"' .. a.note .. '"' } end
+		if Groups.GearLines then Groups.GearLines(lines, a) end
+		if not waiting then
+			lines[#lines + 1] = { indent = 2, text = Gold("> " .. L.GROUPS_INVITE_AS:format(Groups.RoleLabel(a.role))), onClick = function() Groups.Invite(a.name) end }
 		end
 		lines[#lines + 1] = { indent = 2, text = Gold("> " .. L.GROUPS_DECLINE), onClick = function() Groups.Decline(a.name) end }
 		lines[#lines + 1] = { indent = 2, text = Gold("> " .. L.GROUPS_WHISPER:format(who)), onClick = function() ns.Board.Whisper(a.name) end }
 	end
 end
 
--- The composer: where, then the roles wanted, then the dialog with the note.
-local function Cycle(kind, c)
-	local steps = Groups.STEPS[kind]
-	local at = steps:find(c, 1, true) or 0
-	local i = at % #steps + 1
-	return steps:sub(i, i)
+-- Our listing under Your group: it in short (its card on hover), what keeps it from going out or
+-- us from inviting, what it needs (a click changes it), our group with its roles, the invites
+-- waiting, Lower, then the applications.
+local function OwnLines(lines)
+	local e = Groups.OwnEntry()
+	local where = Groups.Target(own.kind, own.target, own.title)
+	lines[#lines + 1] = { indent = 1, text = Green(L.GROUPS_MINE:format(where)),
+		right = Gold(Groups.NeedShort(own.need)) .. "  " .. SizeText(own.kind, e.size) .. "  " .. Grey(ns.Ago(own.raisedAt)),
+		tooltip = function(tt) Groups.ListingTip(tt, e) end }
+	if ns.ChatLocked() then lines[#lines + 1] = { indent = 1, text = "|cffff8040" .. L.GROUPS_LOCKED .. "|r" } end
+	if IsInGroup and IsInGroup() and UnitIsGroupLeader and not UnitIsGroupLeader("player") then
+		lines[#lines + 1] = { indent = 1, text = "|cffff8040" .. L.GROUPS_NOT_LEADER .. "|r" }
+	end
+	if Groups.SIZE[own.kind] ~= 5 and e.size >= 5 and not (IsInRaid and IsInRaid()) then
+		lines[#lines + 1] = { indent = 1, text = "|cffff8040" .. L.GROUPS_CONVERT .. "|r" }
+	end
+	for _, role in ipairs(Groups.ROLES) do
+		local r = role
+		local v = own.need:sub(Groups.ROLE[r], Groups.ROLE[r])
+		lines[#lines + 1] = { indent = 1, text = L.GROUPS_WANTED:format(Groups.RoleLabel(r), Gold(v == "+" and L.GROUPS_ANY or v)),
+			right = Grey(L.GROUPS_CLICK_CHANGE), onClick = function() Groups.StepOwnNeed(r) end,
+			tooltip = function(tt) tt:AddLine(L.GROUPS_EDIT_NEED, 1, 0.82, 0); tt:AddLine(L.GROUPS_EDIT_NEED_TIP, 1, 1, 1, true) end }
+	end
+	if #e.members > 0 then
+		lines[#lines + 1] = { indent = 1, text = Gold(L.GROUPS_ROSTER:format(#e.members + 1)) }
+		for _, m in ipairs(e.members) do
+			local row = MemberRow(m, 2)
+			local name = m.name
+			row.onClick = function() Groups.SetMemberRole(name) end
+			row.tooltip = function(tt) tt:AddLine(ns.DisplayName(name) or name, 1, 0.82, 0); tt:AddLine(L.GROUPS_SET_ROLE_TIP, 1, 1, 1, true) end
+			lines[#lines + 1] = row
+		end
+	end
+	for name, p in pairs(pending) do
+		lines[#lines + 1] = { indent = 1, text = Grey(L.GROUPS_PENDING:format(ns.DisplayName(name) or name, Groups.RoleLabel(p.role))), right = Grey(ns.Ago(p.at)) }
+	end
+	lines[#lines + 1] = { indent = 1, text = Gold("> " .. L.GROUPS_LOWER), onClick = function() Groups.Close() end,
+		tooltip = function(tt) tt:AddLine(L.GROUPS_LOWER, 1, 0.82, 0); tt:AddLine(L.GROUPS_LOWER_TIP, 1, 1, 1, true) end }
+	local list = Groups.Applicants()
+	lines[#lines + 1] = { header = true, text = L.GROUPS_APPLICANTS:format(#list) }
+	for _, a in ipairs(list) do ApplicantLines(lines, a) end
+	if #list == 0 then lines[#lines + 1] = { indent = 1, text = Grey(L.GROUPS_NO_APPLICANTS) } end
 end
+
+-- A row of filters (the Board's strip, smaller in purpose): `key` the section's, options { id, label }.
+local function FilterLine(key, options)
+	local cur = filters[key] or "all"
+	local nav = {}
+	for _, o in ipairs(options) do
+		local id = o[1]
+		nav[#nav + 1] = { text = o[2], selected = cur == id,
+			onClick = cur ~= id and function() filters[key] = id; opened = nil; Redraw() end or nil }
+	end
+	return { nav = nav, id = "board-filter-" .. key }
+end
+function Groups.Filter(key) return filters[key] or "all" end
+function Groups.SetFilter(key, id) filters[key] = id end
+
+local function PassGroup(e, f)
+	if f == "join" then return CanJoin(e) end
+	if f == "log" then return InLog(e.target) end
+	if f == "zone" then return (e.zone or "") ~= "" and e.zone == Groups.CurrentZone() end
+	return true
+end
+
+-- The composer: where, then the roles wanted, then the dialog with the note.
 function Groups.StepNeed(role)
 	if not compose then return end
 	local i = Groups.ROLE[role]
@@ -1049,9 +1300,9 @@ local function PlaceMin(kind, target)
 	local p = kind ~= "Q" and placeByKey[target]
 	return p and p.kind == kind and p.min > 1 and p.min < 99 and p.min or nil
 end
-function Groups.ChooseTarget(target, title)
+function Groups.ChooseTarget(target, title, zone)
 	if not compose then return end
-	compose.target, compose.title = target, title
+	compose.target, compose.title, compose.zone = target, title, zone
 	compose.min = target and PlaceMin(compose.kind, target) or nil
 	Redraw()
 end
@@ -1084,7 +1335,7 @@ function Groups.ConfirmName(data, name)
 	data.answered = true
 	name = Groups.CleanTitle(name)
 	if name == "" or not compose or compose.kind ~= "Q" then return end
-	Groups.ChooseTarget("0", name)
+	Groups.ChooseTarget("0", name, Groups.CurrentZone())
 	return true
 end
 
@@ -1114,7 +1365,7 @@ local function ComposerLines(lines, kind)
 				local qq = quest
 				lines[#lines + 1] = { indent = 2, text = Gold("> " .. quest.title),
 					right = Grey((quest.group and (L.GROUPS_GROUP_QUEST .. "  ") or "") .. L.LEVEL_N:format(quest.level)),
-					onClick = function() Groups.ChooseTarget(tostring(qq.id), qq.title) end }
+					onClick = function() Groups.ChooseTarget(tostring(qq.id), qq.title, qq.zone) end }
 			end
 			if #log == 0 then lines[#lines + 1] = { indent = 2, text = Grey(L.GROUPS_NO_QUESTS) } end
 		else
@@ -1131,22 +1382,16 @@ local function ComposerLines(lines, kind)
 	lines[#lines + 1] = { indent = 1, text = Grey("> " .. L.GROUPS_CANCEL), onClick = function() Groups.Compose(nil) end }
 end
 
--- A kind's section of the Board: our group (or how to list one), our applications, the listings.
+-- A kind's section of the Board: what it is, our group (or how to list one) with its applications,
+-- the groups listed (ours first) with their filters, then the players looking.
 function Groups.Lines(lines, q)
 	local kind = view
 	if not q then
+		lines[#lines + 1] = { indent = 0, text = Grey(L.GROUPS_EXPLAIN), gapAfter = true }
 		lines[#lines + 1] = { header = true, text = L.GROUPS_YOURS,
 			tooltip = function(tt) tt:AddLine(L.GROUPS_YOURS, 1, 0.82, 0); tt:AddLine(L.GROUPS_YOURS_TIP, 1, 1, 1, true) end }
 		if own and own.kind == kind then
-			local where = Groups.Target(own.kind, own.target, own.title)
-			lines[#lines + 1] = { indent = 1, text = Green(L.GROUPS_MINE:format(where)) .. "  " .. L.GROUPS_NEEDS:format(Groups.NeedText(own.need)) .. Note(own.note),
-				right = SizeText(own.kind, GroupSize()) .. "  " .. Grey(ns.Ago(own.raisedAt)) }
-			lines[#lines + 1] = { indent = 1, text = Gold("> " .. L.GROUPS_LOWER), onClick = function() Groups.Close() end,
-				tooltip = function(tt) tt:AddLine(L.GROUPS_LOWER, 1, 0.82, 0); tt:AddLine(L.GROUPS_LOWER_TIP, 1, 1, 1, true) end }
-			local list = Groups.Applicants()
-			lines[#lines + 1] = { header = true, text = L.GROUPS_APPLICANTS:format(#list) }
-			for _, a in ipairs(list) do ApplicantLines(lines, a) end
-			if #list == 0 then lines[#lines + 1] = { indent = 1, text = Grey(L.GROUPS_NO_APPLICANTS) } end
+			OwnLines(lines)
 		elseif own then
 			local k = own.kind
 			lines[#lines + 1] = { indent = 1, text = Grey(L.GROUPS_MINE_ELSEWHERE:format(Groups.KindLabel(k))),
@@ -1160,19 +1405,27 @@ function Groups.Lines(lines, q)
 		end
 		lines[#lines].gapAfter = true
 	end
-	local list = Groups.List(kind)
-	lines[#lines + 1] = { header = true, text = L.GROUPS_UP:format(#list) }
-	local found = 0
-	for _, e in ipairs(list) do
-		if Hit(q, e) then
-			found = found + 1
-			lines[#lines + 1] = Groups.Card(e)
-			if opened == e.sender then CardActions(lines, e) end
-		end
+	local f = filters[kind] or "all"
+	local shown = {}
+	local mine = own and own.kind == kind and Groups.OwnEntry() or nil
+	if mine and Hit(q, mine) then shown[#shown + 1] = mine end
+	for _, e in ipairs(Groups.List(kind)) do
+		if Hit(q, e) and PassGroup(e, f) then shown[#shown + 1] = e end
 	end
-	if found == 0 then
+	lines[#lines + 1] = { header = true, text = L.GROUPS_UP:format(#shown) }
+	local options = { { "all", L.GROUPS_FILTER_ALL }, { "join", L.GROUPS_FILTER_JOIN } }
+	if kind == "Q" then
+		options[#options + 1] = { "log", L.GROUPS_FILTER_LOG }
+		options[#options + 1] = { "zone", L.GROUPS_FILTER_ZONE }
+	end
+	lines[#lines + 1] = FilterLine(kind, options)
+	for _, e in ipairs(shown) do
+		lines[#lines + 1] = Groups.Card(e)
+		if opened == (e.mine and "own" or e.sender) then CardLines(lines, e) end
+	end
+	if #shown == 0 then
 		local askAt = ns.Board.AskedAt and ns.Board.AskedAt()
-		lines[#lines + 1] = { indent = 1, text = Grey(q and L.SEARCH_NO_MATCH or (askAt and ns.Now() - askAt < 30 and L.BOARD_GATHERING or L.GROUPS_EMPTY)) }
+		lines[#lines + 1] = { indent = 1, text = Grey((q or f ~= "all") and L.SEARCH_NO_MATCH or (askAt and ns.Now() - askAt < 30 and L.BOARD_GATHERING or L.GROUPS_EMPTY)) }
 	end
 	-- 1.2: the players whose flag looks for this kind, the ones fitting our group first.
 	Groups.LookingLines(lines, kind, q)
@@ -1330,27 +1583,47 @@ function Groups.Looking(kind)
 	return out
 end
 
--- Our click on Invite under a flag (our listing of its kind up): the game's invite.
-function Groups.InviteFlag(name) -- gp:roster-actions
-	if not own then return false end
-	if IsInGroup and IsInGroup() and UnitIsGroupLeader and not UnitIsGroupLeader("player") then
-		ns.Print(L.GROUPS_NOT_LEADER)
-		return false, "leader"
+-- The roles we could invite a flag's player as: the ones their flag names (all, when it names
+-- none) that our listing still needs.
+function Groups.InviteRoles(e)
+	local out = {}
+	if not own then return out end
+	local plays = ns.Board.CleanRoles(e.roles)
+	for _, r in ipairs(Groups.ROLES) do
+		if (plays == "" or plays:find(r, 1, true)) and Groups.Wants(own.need, r) then out[#out + 1] = r end
 	end
-	local target = ns.TellName(name) or name
-	if C_PartyInfo and C_PartyInfo.InviteUnit then C_PartyInfo.InviteUnit(target) elseif InviteUnit then InviteUnit(target) end -- gp:roster-actions
-	ns.Print(L.GROUPS_INVITED_FLAG:format(ns.DisplayName(name) or name))
+	return out
+end
+
+-- Our click on Invite as a role under a flag (our listing of its kind up): the game's invite; the
+-- role comes off the need when they join (Groups.CheckJoins).
+function Groups.InviteFlag(name, role)
+	if not own or not Groups.ROLE[role] then return false end
+	if not MayInvite() then return false, "leader" end
+	GameInvite(name)
+	pending[name] = { role = role, at = ns.Now() }
+	ns.Print(L.GROUPS_INVITED:format(ns.DisplayName(name) or name, Groups.RoleLabel(role)))
 	opened = nil
 	Redraw()
 	return true
 end
 
+local function PassLooking(e, f)
+	if f == "fits" then return Groups.Fits(e) end
+	if Groups.ROLE[f] then return ns.Board.CleanRoles(e.roles):find(f, 1, true) ~= nil end
+	return true
+end
+
 function Groups.LookingLines(lines, kind, q)
-	local list = Groups.Looking(kind)
 	if kind == "Q" then return end
+	local f = filters.looking or "all"
+	local list = {}
+	for _, e in ipairs(Groups.Looking(kind)) do if PassLooking(e, f) then list[#list + 1] = e end end
 	lines[#lines].gapAfter = true
 	lines[#lines + 1] = { header = true, text = L.GROUPS_LOOKING:format(#list),
 		tooltip = function(tt) tt:AddLine(L.GROUPS_LOOKING:format(#list), 1, 0.82, 0); tt:AddLine(L.GROUPS_LOOKING_TIP, 1, 1, 1, true) end }
+	lines[#lines + 1] = FilterLine("looking", { { "all", L.GROUPS_FILTER_ALL }, { "fits", L.GROUPS_FITS }, { "T", L.GROUPS_ROLE_T },
+		{ "H", L.GROUPS_ROLE_H }, { "D", L.GROUPS_ROLE_D } })
 	local found = 0
 	for _, e in ipairs(list) do
 		if not q or ns.Board.Hit(q, e) then
@@ -1362,15 +1635,21 @@ function Groups.LookingLines(lines, kind, q)
 			card.onClick = function() opened = opened ~= key and key or nil; Redraw() end
 			lines[#lines + 1] = card
 			if opened == key then
-				if own and own.kind == kind then
-					lines[#lines + 1] = { indent = 2, text = Gold("> " .. L.GROUPS_INVITE), onClick = function() Groups.InviteFlag(e.sender) end }
+				if own and own.kind == kind and not pending[e.sender] then
+					for _, r in ipairs(Groups.InviteRoles(e)) do
+						local role = r
+						lines[#lines + 1] = { indent = 2, text = Gold("> " .. L.GROUPS_INVITE_AS:format(Groups.RoleLabel(role))),
+							onClick = function() Groups.InviteFlag(e.sender, role) end }
+					end
+				elseif pending[e.sender] then
+					lines[#lines + 1] = { indent = 2, text = Grey(L.GROUPS_PENDING:format(ns.DisplayName(e.sender) or "?", Groups.RoleLabel(pending[e.sender].role))) }
 				end
 				lines[#lines + 1] = { indent = 2, text = Gold("> " .. L.GROUPS_WHISPER:format(ns.DisplayName(e.sender) or "?")),
 					onClick = function() ns.Board.Whisper(e.sender) end }
 			end
 		end
 	end
-	if found == 0 then lines[#lines + 1] = { indent = 1, text = Grey(q and L.SEARCH_NO_MATCH or L.GROUPS_LOOKING_EMPTY) } end
+	if found == 0 then lines[#lines + 1] = { indent = 1, text = Grey((q or f ~= "all") and L.SEARCH_NO_MATCH or L.GROUPS_LOOKING_EMPTY) } end
 end
 
 ---------------------------------------------------------------------------
@@ -1383,13 +1662,13 @@ function Groups.PromptList(note)
 	local what = ("%s: %s  (%s)"):format(Groups.KindLabel(c.kind), Groups.Target(c.kind, c.target, c.title), L.GROUPS_NEEDS:format(Groups.NeedText(c.need)))
 		.. (c.min and ("  " .. L.GROUPS_MIN_TIP:format(c.min)) or "")
 	return ns.ShowDialog("OLYMPUS_GROUPS_LIST", what, ns.Comm.Audience(), { kind = c.kind, target = c.target, title = c.title, need = c.need,
-		min = c.min, note = ns.Board.CleanNote(note) })
+		min = c.min, zone = c.zone, note = ns.Board.CleanNote(note) })
 end
 
 function Groups.ConfirmList(data, note)
 	if type(data) ~= "table" or data.answered then return end
 	data.answered = true
-	return Groups.Post(data.kind, data.target, data.title, data.need, note, data.min)
+	return Groups.Post(data.kind, data.target, data.title, data.need, note, data.min, data.zone)
 end
 
 function Groups.PromptApply(leader, role, note)
@@ -1474,6 +1753,8 @@ end
 -- Tests start from nothing.
 function Groups.Reset()
 	wipe(posts); wipe(lastNewId); wipe(lowered); wipe(applicants); wipe(apps); wipe(usedIds); wipe(lists)
+	wipe(pending); wipe(roles); wipe(filters)
+	rosterPending = false
 	own, opened, compose, view, flagCompose = nil, nil, nil, "flags", nil
 	lastList = -math.huge
 	changePending = false
@@ -1486,6 +1767,17 @@ ns.Comm.Handle("GM", function(...) Groups.HandleMembers(...) end)
 ns.Comm.Handle("GA", function(...) Groups.HandleApply(...) end)
 ns.Comm.Handle("GW", function(...) Groups.HandleWithdraw(...) end)
 ns.Comm.Handle("GR", function(...) Groups.HandleAnswer(...) end)
+
+-- Someone joined or left our group: our invites checked a second later (the event comes in bursts).
+ns.RegisterEvent("GROUP_ROSTER_UPDATE", function()
+	if rosterPending then return end
+	rosterPending = true
+	Groups.after(1, "groups roster", function()
+		rosterPending = false
+		ns.SafeCall("groups joins", Groups.CheckJoins)
+		Changed()
+	end)
+end)
 
 ns.On("LOGIN", function()
 	Groups.Restore()

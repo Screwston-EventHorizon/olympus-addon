@@ -530,7 +530,8 @@ end
 --   hop, treasury, patrol a layer hop, a donation, a patrol's player without the tabard
 --   update                the author's update notice
 --   arena, watch, craft   1.2's Blood Arena, private guild moderation notices, crafting requests
-ns.SOUND_KINDS = { "arms", "muster", "royal", "court", "vox", "agenda", "throne", "help", "hop", "treasury", "patrol", "update", "arena", "watch", "craft" }
+--   groups                1.2: someone applied to your group on the Board (Groups.lua)
+ns.SOUND_KINDS = { "arms", "muster", "royal", "court", "vox", "agenda", "throne", "help", "hop", "treasury", "patrol", "update", "arena", "watch", "craft", "groups" }
 local SOUND_KIND = {}
 for _, k in ipairs(ns.SOUND_KINDS) do SOUND_KIND[k] = true end
 

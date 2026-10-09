@@ -362,7 +362,8 @@ King's Steward (1.0.0, [below](#the-kings-steward-100)) sends the Crown's decree
 Decrees tab (a click on its line, with the gamepad UI too) or with `/oly sound <kind> on|off`:
 `arms` (Call to Arms), `muster`, `royal` (Royal decrees and Tabard inspections), `court`, `vox`,
 `agenda`, `throne` (the roll call, the Royal Inspection, writs), `help` (help requests and bug
-reports), `hop`, `treasury`, `patrol` and `update`. Silence the chimes you don't want and keep
+reports), `hop`, `treasury`, `patrol` and `update` (1.2: also `groups`, someone applied to your
+group on the Board). Silence the chimes you don't want and keep
 the Call to Arms: `/oly sound` alone is still the switch for every sound, and each kind keeps its
 own switch under it. A softer chime never silences the Call to Arms that follows it. Only the
 sound changes: the chat line, the raid warning and the Olympus window stay, and nothing is sent.
@@ -694,15 +695,30 @@ what each player chose to share, and the King's week.
   that isn't in your log), then which roles you still need (a click steps each of Tank, Healer
   and Damage; raids and PvP also take "any number") and a minimum level (it starts at the level
   the place is usually run from; players under it can't apply), then a short note in a box that
-  says what goes out first. Hovering a group's card shows who is already in it (with the role
-  each applicant was invited as). Players click your card and **Apply as** a role your group
-  still needs, with a note of their own; it reaches you alone, by whisper, and your Board lists
-  the applications under **Your group** (a line in your chat tells you each one). A click on an
-  applicant: **Invite** (the game's own invite, from your click; only the group's leader can),
-  **Decline** (they are told) or **Whisper**. Each invite takes that role off what your listing
-  needs; when nothing is left, or a party reaches five, the listing comes down, and the players
-  still waiting are told. One listing at a time, 30 seconds between two and 6 an hour; it lasts
-  an hour (a quest's half an hour), is repeated like a flag and kept through a `/reload`;
+  says what goes out first. Each group's row says where and who; on its right, what it still
+  needs in short ("1T 1H 3D"), its minimum level, its size and age. Hovering it shows it in full
+  (the leader's guild, level and class, its needs in words, a quest's zone, the note, and who is
+  in the group with their roles); a click opens its **card** under it, the same, with **Apply
+  as** each role it still needs and **Whisper**. Your own group is in the list too, first, marked
+  *(your group)*. Players **Apply as** a role your group still needs, with a note of their own;
+  it reaches you alone, by whisper, with a sound (the `groups` switch of `/oly sound`) and a line
+  in your chat, and your Board lists the applications under **Your group**, each one in full on
+  hover. A click on an applicant: **Invite as** the role they applied for (the game's own invite,
+  from your click; only the group's leader can), **Decline** (they are told) or **Whisper**. The
+  role comes off what your listing needs when they join, not before: an invite they decline or
+  let lapse (2 minutes) leaves the role wanted, and their application waits again. Under **Your
+  group** you also change what the group still needs (a click on each role, for a role switch or
+  a friend from the chat: every Board sees it within seconds) and see who is in your group, a
+  click setting each one's role (the game doesn't tell addons a player's role); it shows on your
+  group's card on every Board. It says so when you are in an instance (the game holds addon
+  messages there: your listing refreshes once you are out), when another player leads your group
+  (only the leader can invite), and when a raid or PvP group of five has to be converted to a raid
+  before anyone else can join. When nothing is left to find, or a party reaches five, the listing
+  comes down, and the players still waiting are told. Filters over the list: **All** or **I can
+  join** (your level, and still needing someone); quests also **In my log** and **My zone**. One
+  listing at a time, 30 seconds between two and 6 an hour; it lasts an hour (a quest's half an
+  hour), is repeated every 5 minutes while few are up (up to 30 on a full Board, so a group whose
+  leader logged off leaves every Board within about 12 minutes) and kept through a `/reload`;
   **Lower your listing** or `/oly group off` takes it down for everyone at once. Five
   applications of yours wait at most; a click withdraws one. Listings for a quest in your own
   log come first, marked. Nothing joins a queue, and nothing invites anyone without the
@@ -711,8 +727,10 @@ what each player chose to share, and the King's week.
   for several places, with your roles** picks the roles you play (any of Tank, Healer, Damage)
   and up to 8 dungeons, raids and PvP spots, or **Any** of a kind, in one flag. Its card says
   them all; each group section lists the players whose flag names it (**Players looking**), the
-  ones that fit your listing first (its place, a role it still needs, its minimum level), and a
-  click whispers them or, with your group listed there, invites them. Clients before 1.2 show it
+  ones that fit your listing first (its place, a role it still needs, its minimum level), filtered
+  by **Fits my group** or a role, and a click whispers them or, with your group listed there,
+  invites them **as** a role their flag names and your group still needs (it comes off the need
+  when they join). Clients before 1.2 show it
   as the plain flag of its first kind.
 
 ### Net-off (1.1): the moderators hide a character or take a guild off the network
@@ -1887,8 +1905,8 @@ message (the game adds it). What goes where:
 | A pinned line (1.1): its words, your guild and, as on every message, your name | the King's, his Stewards' and Hands': everyone on the Olympus channel. A guild master's, and a higher rank's takedown of it: his guild alone (over guild chat) | when you pin one (only while your Olympus chats are on, never while the moderators have you off), again every 5 minutes while it lasts (2 hours at most, a `/reload` included), and when you take it down (`/oly pin off` with nothing pinned on your screen too, once a minute at most: a `/reload` on the Forever beta forgets your pin); a pin you took down (its number and your guild), when you take it down and again when its setter's addon repeats it, once a minute at most, never while the moderators have you off |
 | A flag on the Board (1.1): your guild, level and class, the flag (dungeon, raid, PvP or layer), your note (with the logged API), and your zone only while you share it; 1.2: the roles you play and the places you picked, when you raise a flag for several places | everyone on the Olympus channel, and whispered to a player whose Board asked for the flags up | when you raise it, then every 10 to 30 minutes for an hour at most, until you lower it |
 | The Board's ask (1.1): nothing but your name | everyone on the Olympus channel | once a session, the first time you open the Board |
-| A group listing on the Board (1.2): your guild, level and class, where (a place, a quest's number and title from your log, or a name you typed), the roles still needed, the minimum level, your group's size and your note (with the logged API when it has words) | everyone on the Olympus channel, and whispered to a player whose Board asked | when you list it, after an invite changes it, then every 10 to 30 minutes for an hour at most (a quest's half an hour), until you lower it |
-| Who else is in your listed group (1.2): each one's name and class, and the role an application you invited said | everyone on the Olympus channel, and whispered with your listing to a player whose Board asked | after your listing while anyone is in your group, and when someone joins or leaves |
+| A group listing on the Board (1.2): your guild, level and class, where (a place, a quest's number, title and zone from your log, or a name you typed and the zone you are in), the roles still needed, the minimum level, your group's size and your note (with the logged API when it has words) | everyone on the Olympus channel, and whispered to a player whose Board asked | when you list it, after a change (someone joined or left, you changed what it needs), then every 5 to 30 minutes for an hour at most (a quest's half an hour), until you lower it |
+| Who else is in your listed group (1.2): each one's name and class, and their role when an application you invited said it or you set it | everyone on the Olympus channel, and whispered with your listing to a player whose Board asked | after your listing while anyone is in your group, and when someone joins or leaves |
 | An application to a group (1.2): your guild, level, class, the role you chose and your note (with the logged API); or that you withdraw it | that group's leader alone (a whisper) | only when you click Apply as, or withdraw |
 | A leader's answer to an application (1.2): invited, declined, or the listing closed | that applicant alone (a whisper) | when the leader clicks Invite or Decline, and when the listing closes (10 of those waiting at most) |
 | A signup (1.1): the Agenda entry, the role you claim (or that you withdraw) and your guild | whoever set that entry (the King, his Steward or a Hand), alone (a whisper) | only when you click Sign up |
@@ -2312,8 +2330,8 @@ Other limits:
   it holds 150, so the channel carries about the same whatever the crowd. The ask a player's
   Board sends once a session is answered by whisper, by about 40 flag holders at most, and
   nobody answers past the first 4 asks of a minute (`ch:G1`, `ch:GQ` in `/oly status`).
-- Group listings (1.2) follow the flags' pace: repeated every 10 to 30 minutes, a change sent at
-  most once every 15 seconds, and answered with the flags to the Board's ask (`ch:GL` in
+- Group listings (1.2) repeat every 5 minutes while few are up and every 30 when 150 are (12
+  seconds a listing, as the flags), a change sent at most once every 15 seconds, and answered with the flags to the Board's ask (`ch:GL` in
   `/oly status`); a group with anyone in it adds one message of names after its listing (`ch:GM`). Applications and answers are whispers.
 
 ## Commands
@@ -2393,7 +2411,7 @@ Other limits:
 | `/oly map` | zone markers on the world map |
 | `/oly sound` · `/oly sound on\|off` | every alert sound on or off |
 | `/oly alerts quiet\|always` | in an instance or Busy, Olympus's raid warnings, sounds and popups wait until you are out (quiet, the default), or show at once (1.1) |
-| `/oly sound <kind> on\|off` | one kind's sound (1.1): `arms`, `muster`, `royal`, `court`, `vox`, `agenda`, `throne`, `help`, `hop`, `treasury`, `patrol`, `update`; also a click on its line at the bottom of the Decrees tab |
+| `/oly sound <kind> on\|off` | one kind's sound (1.1): `arms`, `muster`, `royal`, `court`, `vox`, `agenda`, `throne`, `help`, `hop`, `treasury`, `patrol`, `update` (1.2: `groups`); also a click on its line at the bottom of the Decrees tab |
 | `/oly bug` | copyable bug report (also: the help button left of the window's X, then **Report a bug**) |
 | `/oly log [n \| word \| copy \| clear]` | the acts this client saw (decrees, gates, pardons, visibility switches), each with the sender's name; kept on this computer, never sent (1.1) |
 | `/oly status` | diagnostics in chat (1.0.0: whom your addon knows as the King's Steward, and the lists of Hands it holds, whose each is; 1.1.2: the author's in a copy window) |
