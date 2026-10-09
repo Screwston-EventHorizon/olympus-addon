@@ -719,7 +719,13 @@ what each player chose to share, and the King's week.
   listing at a time, 30 seconds between two and 6 an hour; it lasts an hour (a quest's half an
   hour), is repeated every 5 minutes while few are up (up to 30 on a full Board, so a group whose
   leader logged off leaves every Board within about 12 minutes) and kept through a `/reload`;
-  **Lower your listing** or `/oly group off` takes it down for everyone at once. Five
+  **Lower your listing** or `/oly group off` takes it down for everyone at once.
+  **Gear** (1.2): an application to a dungeon, a raid or a battleground (not world PvP, not a
+  quest) carries the applicant's gear to the leader alone: the items they wear, their average item
+  level and their base stats where the client gives them. The apply box says so before it goes;
+  `/oly group gear off` keeps it (applications go without it), `/oly group gear on` sends it again.
+  The leader sees the item level and stats on the applicant's hover and the items on their card,
+  each with the game's own item tooltip, marked *self-reported* (nothing inspects anyone). Five
   applications of yours wait at most; a click withdraws one. Listings for a quest in your own
   log come first, marked. Nothing joins a queue, and nothing invites anyone without the
   leader's click. Clients before 1.2 never see listings (their Board is unchanged).
@@ -1908,6 +1914,7 @@ message (the game adds it). What goes where:
 | A group listing on the Board (1.2): your guild, level and class, where (a place, a quest's number, title and zone from your log, or a name you typed and the zone you are in), the roles still needed, the minimum level, your group's size and your note (with the logged API when it has words) | everyone on the Olympus channel, and whispered to a player whose Board asked | when you list it, after a change (someone joined or left, you changed what it needs), then every 5 to 30 minutes for an hour at most (a quest's half an hour), until you lower it |
 | Who else is in your listed group (1.2): each one's name and class, and their role when an application you invited said it or you set it | everyone on the Olympus channel, and whispered with your listing to a player whose Board asked | after your listing while anyone is in your group, and when someone joins or leaves |
 | An application to a group (1.2): your guild, level, class, the role you chose and your note (with the logged API); or that you withdraw it | that group's leader alone (a whisper) | only when you click Apply as, or withdraw |
+| Your gear with an application (1.2): the item IDs you wear, your average item level and your base stats | that group's leader alone (a whisper) | with an application to a dungeon, a raid or a battleground, unless you turned it off (`/oly group gear off`) |
 | A leader's answer to an application (1.2): invited, declined, or the listing closed | that applicant alone (a whisper) | when the leader clicks Invite or Decline, and when the listing closes (10 of those waiting at most) |
 | A signup (1.1): the Agenda entry, the role you claim (or that you withdraw) and your guild | whoever set that entry (the King, his Steward or a Hand), alone (a whisper) | only when you click Sign up |
 | A signup sheet (1.1): the counts per role of each entry, no names, and when the next one comes | everyone on the Olympus channel | from the client of whoever set the entries, soon after a change, then every 5 minutes while one of them has signups or is within 2 days, every 15 otherwise |
@@ -2384,7 +2391,7 @@ Other limits:
 | `/oly discord certified` | the author: every certificate his client signed as the council authority (off as it ships) for a High Councillor's key (key id, character, end), for the bot's keeper |
 | `/oly hop` | ask for an invite to the King's layer (while he is online) |
 | `/oly lfg` · `/oly lfg dungeon\|raid\|pvp\|layer [note]` · `/oly lfg off` | the Board (1.1): who is looking for a group; raise your flag (a box with your note first) or lower it |
-| `/oly group` · `/oly group dungeon\|raid\|pvp\|quest` · `/oly group off` | the Board's groups (1.2): list your group, apply to one, answer applications; lower yours |
+| `/oly group` · `/oly group dungeon\|raid\|pvp\|quest` · `/oly group off` · `/oly group gear on\|off` | the Board's groups (1.2): list your group, apply to one, answer applications; lower yours; whether your gear goes with your applications |
 | `/oly week` | the King's week on the Board (1.1): his Agenda for 7 days with your guild's calendar events; the King and his Hands add entries with the Agenda button ("Sat 20:00 Raid night") |
 | `/oly camp [note]` · `/oly camp off` · `/oly camps on\|off` | drop a camp in your zone (1.1: it needs `/oly location on`) or take yours down; the camps' badges on the world map |
 | `/oly vox off` · `/oly vox on` | Vox Populi questions in chat only, or in a window |

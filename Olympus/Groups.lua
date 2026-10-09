@@ -35,6 +35,14 @@ local L = ns.L
 --                                                   (a raid's names past one message)
 --   GA~<id>~<guild>~<role>~<level>~<class>~<note>   an application, whispered to the leader
 --                                                   (role T, H or D; the note logged)
+--   GG~<id>~<ilvl>~<items>~<stats>                  the applicant's gear, after the GA, to the
+--                                                   leader alone (a dungeon, a raid or a
+--                                                   battleground; /oly group gear off: never):
+--                                                   their average item level, the item IDs of
+--                                                   GEAR_SLOTS in order (0: empty), and Strength,
+--                                                   Agility, Stamina, Intellect and Spirit when
+--                                                   the client gives them (else empty). Their own
+--                                                   word: shown as self-reported
 --   GW~<id>                                         an application withdrawn (whispered)
 --   GR~<id>~<answer>                                the leader's answer, whispered: I invited,
 --                                                   D declined, F the listing closed
@@ -74,6 +82,12 @@ Groups.MEMBERS_MAX = 39      -- names a GM may list
 Groups.EVERY_MIN, Groups.EVERY_MAX = 5, 30 -- minutes between a listing's refreshes, by how many are up
 Groups.ZONE_MAX = 30         -- bytes of a quest's zone
 Groups.INVITE_WAIT = 120     -- seconds an invite waits for its player to join before its role is wanted again
+-- The equipment slots an application's gear names, in order: head, neck, shoulder, back, chest,
+-- wrist, hands, waist, legs, feet, two rings, two trinkets, main hand, off hand, ranged.
+Groups.GEAR_SLOTS = { 1, 2, 3, 15, 5, 9, 10, 6, 7, 8, 11, 12, 13, 14, 16, 17, 18 }
+-- The places whose applications carry gear: every dungeon and raid, and the battlegrounds (not
+-- world PvP, not quests).
+Groups.GEAR_PVP = { WSG = true, AB = true, AV = true, DARK = true }
 
 -- The places a listing names (WoW: Forever's, as its players know them; a key is never shown).
 -- min: the level the place is usually run from (the composer sorts by it). A key this version
@@ -264,6 +278,40 @@ function Groups.DecodeMembers(s)
 		list[#list + 1] = { name = name, class = class, role = role ~= "" and role or nil }
 	end
 	return { id = id, more = tonumber(more), members = list }
+end
+
+-- An application's gear: { ilvl, items = { id or 0 ... } (GEAR_SLOTS' order), stats = { 5 } or nil }.
+function Groups.EncodeGear(id, g)
+	local items = {}
+	for i = 1, #Groups.GEAR_SLOTS do items[i] = tostring(math.max(0, math.floor(tonumber(g.items and g.items[i]) or 0))) end
+	local stats = ""
+	if type(g.stats) == "table" and #g.stats == 5 then
+		local parts = {}
+		for i = 1, 5 do parts[i] = tostring(math.max(0, math.min(99999, math.floor(tonumber(g.stats[i]) or 0)))) end
+		stats = table.concat(parts, ",")
+	end
+	return ("GG~%s~%d~%s~%s"):format(id, math.max(0, math.min(999, math.floor(tonumber(g.ilvl) or 0))), table.concat(items, ","), stats)
+end
+function Groups.DecodeGear(s)
+	if type(s) ~= "string" then return nil end
+	local id, ilvl, items, stats = s:match("^GG~([0-9a-z][0-9a-z]?)~(%d%d?%d?)~([%d,]+)~([%d,]*)$")
+	if not id then return nil end
+	local list = {}
+	for x in (items .. ","):gmatch("(%d*),") do
+		if x == "" or #x > 7 then return nil end
+		list[#list + 1] = tonumber(x)
+	end
+	if #list ~= #Groups.GEAR_SLOTS then return nil end
+	local st
+	if stats ~= "" then
+		st = {}
+		for x in (stats .. ","):gmatch("(%d*),") do
+			if x == "" or #x > 5 then return nil end
+			st[#st + 1] = tonumber(x)
+		end
+		if #st ~= 5 then return nil end
+	end
+	return { id = id, ilvl = tonumber(ilvl), items = list, stats = st }
 end
 
 function Groups.EncodeApply(id, guild, role, level, class, note)
@@ -614,7 +662,8 @@ local function Save()
 	if own then
 		local list = {}
 		for name, a in pairs(applicants) do
-			list[name] = { guild = a.guild, role = a.role, level = a.level, class = a.class, note = a.note, at = a.at, state = a.state }
+			list[name] = { guild = a.guild, role = a.role, level = a.level, class = a.class, note = a.note, at = a.at, state = a.state,
+				gear = a.gear and Groups.EncodeGear(own.id, a.gear) or nil }
 		end
 		mine = { id = own.id, kind = own.kind, target = own.target, title = own.title, need = own.need, note = own.note, min = own.min, zone = own.zone,
 			raisedAt = own.raisedAt, sentAt = own.sentAt, every = own.every, applicants = list }
@@ -639,6 +688,8 @@ function Groups.Restore(now)
 			if type(name) == "string" and type(a) == "table" and Groups.ROLE[a.role] then
 				applicants[name] = { name = name, guild = tostring(a.guild or ""), role = a.role, level = tonumber(a.level) or 1,
 					class = tostring(a.class or ""), note = ns.Board.CleanNote(a.note), at = tonumber(a.at) or now, state = a.state == "invited" and "invited" or "new" }
+				local g = Groups.DecodeGear(a.gear)
+				if g then applicants[name].gear = { ilvl = g.ilvl, items = g.items, stats = g.stats } end
 			end
 		end
 	end
@@ -779,6 +830,17 @@ function Groups.HandleApply(dist, sender, text)
 	if not old then ns.PlayAlert("soft", "groups") end
 	Save()
 	ns.Print(L.GROUPS_APPLICANT:format(ns.DisplayName(sender) or sender, Groups.RoleLabel(a.role), Groups.Target(own.kind, own.target, own.title)))
+	Changed()
+end
+
+function Groups.HandleGear(dist, sender, text)
+	if dist ~= "WHISPER" or not own or not Groups.GearGoes({ kind = own.kind, target = own.target }) then return end
+	local g = Groups.DecodeGear(text)
+	sender = ns.FullName(sender)
+	local a = applicants[sender]
+	if not g or g.id ~= own.id or not a then return end
+	a.gear = { ilvl = g.ilvl, items = g.items, stats = g.stats }
+	Save()
 	Changed()
 end
 
@@ -938,6 +1000,7 @@ function Groups.Apply(leader, role, note)
 	end
 	note = ns.Board.CleanNote(note)
 	ns.Comm.Whisper(leader, Groups.EncodeApply(e.id, GetGuildInfo("player"), role, MyLevel(), MyClass(), note), nil, nil, note ~= "")
+	if Groups.GearGoes(e) then ns.Comm.Whisper(leader, Groups.EncodeGear(e.id, Groups.MyGear())) end
 	apps[leader] = { id = e.id, role = role, at = now, state = "sent", kind = e.kind, target = e.target, title = e.title }
 	ns.Print(L.GROUPS_APPLIED:format(Groups.RoleLabel(role), Groups.Target(e.kind, e.target, e.title), ns.DisplayName(leader) or leader))
 	Changed()
@@ -1067,6 +1130,82 @@ function Groups.NeedShort(need)
 		if c then parts[#parts + 1] = c == "+" and (L["GROUPS_SHORT_" .. role] .. "+") or (c .. L["GROUPS_SHORT_" .. role]) end
 	end
 	return #parts > 0 and table.concat(parts, " ") or L.GROUPS_FULL
+end
+
+---------------------------------------------------------------------------
+-- Gear (1.2): what an applicant wears, sent with their application to the leader alone
+---------------------------------------------------------------------------
+
+-- Whether an application to this listing carries our gear: a dungeon, a raid or a battleground,
+-- while /oly group gear is on (the default: the apply box says it goes).
+function Groups.GearGoes(e)
+	if not e or (ns.db and ns.db.groupsGear == false) then return false end
+	return e.kind == "D" or e.kind == "R" or (e.kind == "P" and Groups.GEAR_PVP[e.target] == true)
+end
+
+-- An item's level, from the client's item data (nil until the client has it).
+local function ItemLevel(id)
+	if not id or id == 0 then return nil end
+	local level
+	if C_Item and C_Item.GetItemInfo then
+		local ok, _, _, _, lvl = pcall(C_Item.GetItemInfo, id)
+		if ok then level = lvl end
+	end
+	if not level and GetItemInfo then
+		local ok, _, _, _, lvl = pcall(GetItemInfo, id)
+		if ok then level = lvl end
+	end
+	return tonumber(level)
+end
+Groups.ItemLevel = ItemLevel
+
+-- What we wear now: the item IDs of GEAR_SLOTS, their average level (of the items the client
+-- knows the level of) and our five base stats where the client gives them.
+function Groups.MyGear()
+	local items, sum, n = {}, 0, 0
+	for i, slot in ipairs(Groups.GEAR_SLOTS) do
+		local id = 0
+		if GetInventoryItemID then
+			local ok, x = pcall(GetInventoryItemID, "player", slot)
+			if ok and tonumber(x) then id = math.floor(tonumber(x)) end
+		end
+		items[i] = id
+		local lvl = ItemLevel(id)
+		if lvl then sum, n = sum + lvl, n + 1 end
+	end
+	local stats
+	if UnitStat then
+		stats = {}
+		for i = 1, 5 do
+			local ok, _, effective = pcall(UnitStat, "player", i)
+			if not ok or not tonumber(effective) then stats = nil break end
+			stats[i] = math.floor(tonumber(effective))
+		end
+	end
+	return { ilvl = n > 0 and math.floor(sum / n + 0.5) or 0, items = items, stats = stats }
+end
+
+-- An applicant's gear in their tooltip: the average item level and the stats, their own word.
+function Groups.GearTip(tt, a)
+	local g = a.gear
+	if not g then return end
+	tt:AddLine(L.GROUPS_GEAR_ILVL:format(g.ilvl) .. "  " .. Grey(L.GROUPS_GEAR_SELF), 1, 1, 1)
+	if g.stats then tt:AddLine(L.GROUPS_GEAR_STATS:format(g.stats[1], g.stats[2], g.stats[3], g.stats[4], g.stats[5]), 1, 1, 1, true) end
+end
+
+-- An applicant's gear on their card: the level and stats, then the items, each with the game's
+-- own tooltip (Views' item grid).
+function Groups.GearLines(lines, a)
+	local g = a.gear
+	if not g then
+		if own and Groups.GearGoes(own) then lines[#lines + 1] = { indent = 2, text = Grey(L.GROUPS_GEAR_NONE) } end
+		return
+	end
+	lines[#lines + 1] = { indent = 2, text = L.GROUPS_GEAR_ILVL:format(g.ilvl) .. "  " .. Grey(L.GROUPS_GEAR_SELF),
+		right = g.stats and Grey(L.GROUPS_GEAR_STATS:format(g.stats[1], g.stats[2], g.stats[3], g.stats[4], g.stats[5])) or nil }
+	local items = {}
+	for _, id in ipairs(g.items) do if id and id > 0 then items[#items + 1] = { id = id } end end
+	if #items > 0 then lines[#lines + 1] = { indent = 2, items = items } end
 end
 
 -- Our own listing as the list shows it (first, marked as ours), with our group as it is now.
@@ -1675,7 +1814,8 @@ function Groups.PromptApply(leader, role, note)
 	local e = posts[leader]
 	if not e then return ns.Print(L.GROUPS_GONE) end
 	local what = L.GROUPS_APPLY_WHAT:format(Groups.RoleLabel(role), Groups.Target(e.kind, e.target, e.title), ns.DisplayName(leader) or leader)
-	return ns.ShowDialog("OLYMPUS_GROUPS_APPLY", what, ns.Comm.Audience(), { leader = leader, role = role, note = ns.Board.CleanNote(note) })
+	local goes = (Groups.GearGoes(e) and (L.GROUPS_GEAR_GOES .. " ") or "") .. ns.Comm.Audience()
+	return ns.ShowDialog("OLYMPUS_GROUPS_APPLY", what, goes, { leader = leader, role = role, note = ns.Board.CleanNote(note) })
 end
 
 function Groups.ConfirmApply(data, note)
@@ -1729,7 +1869,12 @@ StaticPopupDialogs["OLYMPUS_GROUPS_APPLY"] = NoteDialog(L.GROUPS_APPLY_ASK, L.GR
 Groups.WORDS = { d = "D", dungeon = "D", dungeons = "D", masmorra = "D", r = "R", raid = "R", raids = "R", raide = "R",
 	p = "P", pvp = "P", jxj = "P", q = "Q", quest = "Q", quests = "Q", missao = "Q", ["miss\195\163o"] = "Q" }
 function Groups.Slash(rest)
-	local word = ns.Fold((tostring(rest or ""):match("^(%S*)")))
+	local word, arg = tostring(rest or ""):match("^(%S*)%s*(%S*)")
+	word, arg = ns.Fold(word or ""), ns.Fold(arg or "")
+	if word == "gear" then
+		if arg == "on" or arg == "off" then ns.db.groupsGear = arg == "on" end
+		return ns.Print(ns.db.groupsGear == false and L.GROUPS_GEAR_OFF or L.GROUPS_GEAR_ON)
+	end
 	if word == "off" then
 		if not Groups.Close() then ns.Print(L.GROUPS_NONE_UP) end
 		return
@@ -1766,6 +1911,7 @@ ns.Comm.Handle("GX", function(...) Groups.HandleLower(...) end)
 ns.Comm.Handle("GM", function(...) Groups.HandleMembers(...) end)
 ns.Comm.Handle("GA", function(...) Groups.HandleApply(...) end)
 ns.Comm.Handle("GW", function(...) Groups.HandleWithdraw(...) end)
+ns.Comm.Handle("GG", function(...) Groups.HandleGear(...) end)
 ns.Comm.Handle("GR", function(...) Groups.HandleAnswer(...) end)
 
 -- Someone joined or left our group: our invites checked a second later (the event comes in bursts).

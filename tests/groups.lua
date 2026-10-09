@@ -286,7 +286,10 @@ test("1.2 groups: apply with a role the group needs (the note logged, to the lea
 		eq(p.name, "OLYMPUS_GROUPS_APPLY")
 		eq(p.a, ns.L.GROUPS_APPLY_WHAT:format(ns.L.GROUPS_ROLE_T, "Shadowfang Keep", "Aldric"))
 		G.ConfirmApply(p.data, "prot war, 25")
-		local wh = LastWhisper(w)
+		-- (1.2 gear: a dungeon's application is followed by the applicant's gear, the last whisper;
+		-- the application is the one before it.)
+		local wh = w.whispered[#w.whispered - 1]
+		eq(LastWhisper(w).msg:sub(1, 3), "GG~"); eq(LastWhisper(w).to, "Aldric-Realm")
 		eq(wh.to, "Aldric-Realm"); eq(wh.logged, true)
 		local a = G.DecodeApply(wh.msg)
 		eq(a.id, "a1"); eq(a.role, "T"); eq(a.guild, "Olympus II"); eq(a.note, "prot war, 25"); eq(a.level, 42); eq(a.class, "PR")
@@ -861,5 +864,105 @@ test("1.2 groups: a listing repeats every 5 minutes while few are up (up to 30 w
 		eq(#G.List("D"), 1, "two refreshes missed: still there at 11 minutes")
 		w.clock = w.clock + 60
 		eq(#G.List("D"), 0, "gone at 12")
+	end)
+end)
+
+test("1.2 groups (gear): an application to a dungeon, raid or battleground carries the applicant's gear to the leader alone, as the apply box says; never to a quest or world PvP, nor with /oly group gear off", function()
+	WithGroups(function(w, G, B)
+		AsSoldier()
+		local G_ = G
+		-- The gear's message: 17 slots, the level, five stats (or none), one whisper.
+		local g = { ilvl = 61, items = {}, stats = { 120, 80, 300, 40, 55 } }
+		for i = 1, #G_.GEAR_SLOTS do g.items[i] = 1000000 + i end
+		g.items[4] = 0
+		local msg = G.EncodeGear("a1", g)
+		assert(#msg <= 250, "one message: " .. #msg)
+		local back = G.DecodeGear(msg)
+		eq(back.ilvl, 61); eq(back.items[1], 1000001); eq(back.items[4], 0); eq(back.stats[3], 300)
+		eq(G.DecodeGear(G.EncodeGear("a1", { ilvl = 10, items = {} })).stats, nil, "no stats: none")
+		for _, bad in ipairs({ "GG~a1~61~1,2,3~", "GG~a1~61~" .. ("1,"):rep(16) .. "1~1,2", "GG~A1~61~" .. ("1,"):rep(16) .. "1~", "GG~a1~x~1~" }) do
+			eq(G.DecodeGear(bad), nil, bad)
+		end
+		-- What we wear: the client's item IDs and levels, our stats.
+		local saved = { id = GetInventoryItemID, item = C_Item, stat = UnitStat }
+		GetInventoryItemID = function(unit, slot) return unit == "player" and (slot ~= 15 and 5000 + slot or nil) or nil end
+		C_Item = { GetItemInfo = function(id) return "Item", "link", 3, id % 2 == 0 and 60 or 50 end }
+		UnitStat = function(_, i) return 10, 100 + i, 0, 0 end
+		local ok, err = pcall(function()
+			local mine = G.MyGear()
+			eq(mine.items[1], 5001); eq(mine.items[4], 0, "nothing on the back")
+			eq(mine.stats[1], 101); eq(mine.stats[5], 105)
+			assert(mine.ilvl >= 50 and mine.ilvl <= 60, tostring(mine.ilvl))
+			-- Applying to a dungeon: the box says the gear goes; the GG follows the GA, to the leader alone.
+			G.HandlePost("CHANNEL", "Aldric-Realm", Listing("a1", "Olympus Zeus", "D", "DM", "113", 0))
+			G.PromptApply("Aldric-Realm", "D")
+			assert(w.popups[#w.popups].b:find(ns.L.GROUPS_GEAR_GOES, 1, true), w.popups[#w.popups].b)
+			assert(G.Apply("Aldric-Realm", "D"))
+			eq(w.whispered[#w.whispered - 1].msg:sub(1, 3), "GA~")
+			local gg = w.whispered[#w.whispered]
+			eq(gg.to, "Aldric-Realm"); eq(G.DecodeGear(gg.msg).items[1], 5001)
+			eq(#w.sent, 0, "never on the channel")
+			-- A quest, world PvP: no gear, and the box doesn't say it goes.
+			G.HandlePost("CHANNEL", "Brenna-Realm", Listing("b1", "Olympus Zeus", "Q", "176", "012", 0, nil, "Kill Hogger"))
+			G.HandlePost("CHANNEL", "Cora-Realm", Listing("c1", "Olympus Zeus", "P", "HILLS", "0++", 0))
+			G.HandlePost("CHANNEL", "Dora-Realm", Listing("d1", "Olympus Zeus", "P", "WSG", "0++", 0))
+			local n = #w.whispered
+			assert(G.Apply("Brenna-Realm", "D")); assert(G.Apply("Cora-Realm", "D"))
+			eq(#w.whispered, n + 2, "applications only")
+			G.PromptApply("Cora-Realm", "D")
+			assert(not w.popups[#w.popups].b:find(ns.L.GROUPS_GEAR_GOES, 1, true))
+			assert(G.Apply("Dora-Realm", "D"))
+			eq(w.whispered[#w.whispered].msg:sub(1, 3), "GG~", "a battleground: gear")
+			-- /oly group gear off: none, until on again.
+			B.Slash("group", "gear off")
+			eq(ns.db.groupsGear, false)
+			assert(w.printed[#w.printed]:find(ns.L.GROUPS_GEAR_OFF, 1, true))
+			G.HandlePost("CHANNEL", "Eda-Realm", Listing("e1", "Olympus Zeus", "R", "MC", "+++", 0))
+			n = #w.whispered
+			assert(G.Apply("Eda-Realm", "D"))
+			eq(#w.whispered, n + 1, "no gear")
+			B.Slash("group", "gear on")
+			eq(ns.db.groupsGear, true)
+		end)
+		GetInventoryItemID, C_Item, UnitStat = saved.id, saved.item, saved.stat
+		ns.db.groupsGear = nil
+		if not ok then error(err, 0) end
+	end)
+end)
+
+test("1.2 groups (gear): the leader keeps an applicant's gear (theirs alone, for our listing): item level and stats on hover, the items on their card, kept through a /reload", function()
+	WithGroups(function(w, G, B)
+		AsSoldier()
+		assert(G.Post("D", "DM", nil, "113", ""))
+		local id = G.Mine().id
+		local g = { ilvl = 33, items = {}, stats = { 50, 40, 60, 20, 25 } }
+		for i = 1, #G.GEAR_SLOTS do g.items[i] = 0 end
+		g.items[1], g.items[15] = 7001, 7015
+		-- Before the application, from someone else, for another listing, not whispered: nothing.
+		G.HandleGear("WHISPER", "Aldric-Realm", G.EncodeGear(id, g))
+		G.HandleApply("WHISPER", "Aldric-Realm", G.EncodeApply(id, "Olympus Zeus", "T", 30, "WA", ""))
+		G.HandleGear("WHISPER", "Aldric-Realm", G.EncodeGear("zz", g))
+		G.HandleGear("CHANNEL", "Aldric-Realm", G.EncodeGear(id, g))
+		G.HandleGear("WHISPER", "Brenna-Realm", G.EncodeGear(id, g))
+		eq(G.Applicants()[1].gear, nil)
+		G.Show("D", true)
+		Line(B.Lines(), "Aldric").onClick()
+		assert(Line(B.Lines(), ns.L.GROUPS_GEAR_NONE), "a card without gear says so")
+		G.HandleGear("WHISPER", "Aldric-Realm", G.EncodeGear(id, g))
+		eq(G.Applicants()[1].gear.ilvl, 33)
+		local lines = B.Lines()
+		local tip = Tip(Line(lines, "Aldric"))
+		assert(tip:find(ns.L.GROUPS_GEAR_ILVL:format(33), 1, true) and tip:find(ns.L.GROUPS_GEAR_SELF, 1, true)
+			and tip:find(ns.L.GROUPS_GEAR_STATS:format(50, 40, 60, 20, 25), 1, true), tip)
+		local grid
+		for _, l in ipairs(lines) do if l.items then grid = l end end
+		assert(grid, "the items on the card")
+		eq(#grid.items, 2); eq(grid.items[1].id, 7001); eq(grid.items[2].id, 7015)
+		-- A /reload keeps it.
+		local saved = ns.rdb.groups
+		G.Reset()
+		ns.rdb.groups = saved
+		G.Restore()
+		eq(G.Applicants()[1].gear.items[15], 7015)
 	end)
 end)
